@@ -1,4 +1,4 @@
-# tablog
+# TabLog
 
 One function. Every language. One terminal.
 
