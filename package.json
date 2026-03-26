@@ -1,6 +1,6 @@
 {
   "name": "tablogger",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Universal logging function — tablog() works on frontend, backend, any language",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
