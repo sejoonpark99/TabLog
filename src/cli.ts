@@ -1023,6 +1023,23 @@ async function main(): Promise<void> {
     config = await runSetupWizard().catch(() => null)
   }
 
+  // Free port if already in use (previous tablogger instance)
+  try {
+    const { execSync } = require('node:child_process') as typeof import('node:child_process')
+    if (process.platform === 'win32') {
+      const out = execSync(`netstat -ano | findstr :${PORT}`, { encoding: 'utf8', stdio: ['pipe','pipe','pipe'] })
+      const pids = new Set<string>()
+      for (const line of out.split('\n')) {
+        if (!line.includes('LISTENING')) continue
+        const pid = line.trim().split(/\s+/).pop()
+        if (pid && pid !== '0') pids.add(pid)
+      }
+      for (const pid of pids) execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' })
+    } else {
+      execSync(`lsof -ti tcp:${PORT} | xargs kill -9`, { stdio: 'ignore' })
+    }
+  } catch { /* nothing was on the port */ }
+
   // Start WebSocket + HTTP server
   const server = createServer({
     port: PORT,
