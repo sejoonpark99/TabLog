@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.config.json
+tablog.config.json
+test/
+plans/
+python/alt_tab/
+.env
+*.log
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
