@@ -9,6 +9,7 @@ export interface FilterState {
   showNetwork: boolean
   knownSources: Map<string, { logs: number; network: number }>
   focusedSource: string | null  // null = show all
+  splitSources: string[] | null  // null = interleaved mode
 }
 
 export const filterState: FilterState = {
@@ -17,6 +18,7 @@ export const filterState: FilterState = {
   showNetwork: true,
   knownSources: new Map(),
   focusedSource: null,
+  splitSources: null,
 }
 
 export function registerMessage(msg: AltTabMessage): void {

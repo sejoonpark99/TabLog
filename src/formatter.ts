@@ -30,6 +30,29 @@ function label(source: string): string {
   return getColor(source)(tag.padEnd(maxLabelLen))
 }
 
+/** Wrap and indent text to fit within maxWidth, aligning continuations under col. */
+function wrapMessage(text: string, maxWidth: number, col: number): string {
+  if (maxWidth < 10) return text
+  const pad = ' '.repeat(col)
+  const lines = text.split('\n')
+  const result: string[] = []
+  for (const line of lines) {
+    if (line.length <= maxWidth) {
+      result.push(line)
+    } else {
+      let remaining = line
+      let first = true
+      while (remaining.length > maxWidth) {
+        result.push((first ? '' : pad) + remaining.slice(0, maxWidth))
+        remaining = remaining.slice(maxWidth)
+        first = false
+      }
+      if (remaining) result.push((first ? '' : pad) + remaining)
+    }
+  }
+  return result.join('\n' + pad)
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function fmtSize(bytes: number): string {
@@ -57,14 +80,20 @@ function fmtDuration(ms: number): string {
 // ── Log line ──────────────────────────────────────────────────────────────
 
 export function formatLog(source: string, message: string, level?: string): string {
+  const lbl = label(source)
+  const lblLen = lbl.replace(/\x1B\[[0-9;]*m/g, '').length
+  // +2 for the two spaces between label and message
+  const col = lblLen + 2
+  const termWidth = process.stdout.columns || 120
+  const msgWidth = termWidth - col
   let text: string
   switch (level) {
-    case 'error': text = `${pc.red('●')} ${pc.red(message)}`; break
-    case 'warn':  text = pc.yellow(message); break
-    case 'info':  text = pc.dim(message); break
-    default:      text = message
+    case 'error': text = pc.red(`● ${wrapMessage(message, msgWidth - 2, col + 2)}`); break
+    case 'warn':  text = pc.yellow(wrapMessage(message, msgWidth, col)); break
+    case 'info':  text = pc.dim(wrapMessage(message, msgWidth, col)); break
+    default:      text = wrapMessage(message, msgWidth, col)
   }
-  return `${label(source)}  ${text}`
+  return `${lbl}  ${text}`
 }
 
 // ── Network line ──────────────────────────────────────────────────────────
@@ -82,15 +111,15 @@ export function formatNetwork(
   direction: 'outgoing' | 'incoming' = 'outgoing',
   matchedSource?: string,
 ): string {
-  const arrow = direction === 'incoming' ? pc.dim('↙') : pc.dim('↗')
+  const dir = pc.dim(direction === 'incoming' ? 'in ' : 'out')
   const methodStr = pc.bold(method.toUpperCase().padEnd(5))
   const displayUrl =
     url.length > URL_LEN ? `${url.slice(0, URL_LEN - 1)}…` : url.padEnd(URL_LEN)
   const size = responseSize >= 0 ? responseSize : requestSize
   const sizeStr = pc.dim(fmtSize(size).padStart(6))
-  const match = matchedSource ? `  ${pc.dim('↔')} ${getColor(matchedSource)(matchedSource)}` : ''
+  const match = matchedSource ? `  ${pc.dim('<>')} ${getColor(matchedSource)(matchedSource)}` : ''
 
-  return `${label(source)}  ${arrow}  ${methodStr} ${displayUrl}  ${fmtStatus(status)}  ${fmtDuration(duration)}  ${sizeStr}${match}`
+  return `${label(source)}  ${dir}  ${methodStr} ${displayUrl}  ${fmtStatus(status)}  ${fmtDuration(duration)}  ${sizeStr}${match}`
 }
 
 // ── Separator (connect / disconnect) ─────────────────────────────────────
@@ -128,8 +157,8 @@ export function formatBanner(port: number, config: TablogConfig | null): string 
 
   const wsLine  = row(`ws://localhost:${port}`)
   const blank   = row('')
-  const cmd1    = row(`${pc.dim('/tab')} [1|2|all]  switch terminal`)
-  const cmd2    = row(`${pc.dim('/change')}  filter  ${pc.dim('/export')}  save`)
+  const cmd1    = row(`${pc.dim('/tab')} [1|2|all]  switch  ${pc.dim('/split')} [1|2|off]  columns`)
+  const cmd2    = row(`${pc.dim('/change')}  filter  ${pc.dim('/copy')}  copy  ${pc.dim('/export')}  save`)
 
   let serviceRow = ''
   if (config?.services?.length) {

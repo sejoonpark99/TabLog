@@ -51,3 +51,7 @@ export function exportSession(outputDir = '.'): ExportResult {
 export function bufferSize(): number {
   return sessionBuffer.length
 }
+
+export function getRecentBuffer(n = 50): BufferedEntry[] {
+  return sessionBuffer.slice(-n)
+}

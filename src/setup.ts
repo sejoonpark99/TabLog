@@ -228,31 +228,36 @@ export async function runSetupWizard(tablogPort: number): Promise<TablogConfig> 
   })
   console.log()
 
-  // Auto-pick sensible defaults based on detected roles
-  const defaultFrontendIdx = detected.findIndex((s) => s.role === 'frontend')
-  const defaultBackendIdx  = detected.findIndex((s) => s.role === 'backend')
-
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
 
-  const fPrompt = `  Frontend ${defaultFrontendIdx >= 0 ? pc.dim(`[${defaultFrontendIdx + 1}]`) : ''}: `
-  const fRaw = (await ask(rl, fPrompt)).trim()
-  const fIdx = fRaw ? parseInt(fRaw, 10) - 1 : defaultFrontendIdx
-
-  const bPrompt = `  Backend  ${defaultBackendIdx >= 0 ? pc.dim(`[${defaultBackendIdx + 1}]`) : ''}: `
-  const bRaw = (await ask(rl, bPrompt)).trim()
-  const bIdx = bRaw ? parseInt(bRaw, 10) - 1 : defaultBackendIdx
+  const allNums = detected.map((_, i) => i + 1).join(' ')
+  const prompt = `  Select services to monitor ${pc.dim(`[${allNums} / Enter for all]`)}: `
+  const raw = (await ask(rl, prompt)).trim()
 
   rl.close()
 
-  const services: ServiceConfig[] = []
-  if (detected[fIdx]) {
-    const s = detected[fIdx]
-    services.push({ name: s.name, port: s.port, role: 'frontend', ...(s.pid !== undefined && { pid: s.pid }) })
+  // Parse selection — empty = all, otherwise space/comma-separated numbers
+  let selectedIdxs: number[]
+  if (!raw) {
+    selectedIdxs = detected.map((_, i) => i)
+  } else {
+    selectedIdxs = raw
+      .split(/[\s,]+/)
+      .map((t) => parseInt(t, 10) - 1)
+      .filter((i) => i >= 0 && i < detected.length)
+    // Deduplicate
+    selectedIdxs = [...new Set(selectedIdxs)]
   }
-  if (detected[bIdx] && bIdx !== fIdx) {
-    const s = detected[bIdx]
-    services.push({ name: s.name, port: s.port, role: 'backend', ...(s.pid !== undefined && { pid: s.pid }) })
-  }
+
+  const services: ServiceConfig[] = selectedIdxs.map((i) => {
+    const s = detected[i]
+    return {
+      name: s.name,
+      port: s.port,
+      role: s.role === 'unknown' ? 'backend' : s.role,
+      ...(s.pid !== undefined && { pid: s.pid }),
+    }
+  })
 
   const config: TablogConfig = { services }
   saveConfig(config)
