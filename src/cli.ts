@@ -389,6 +389,7 @@ function handleCorrelation(n: NetworkMessage): string | undefined {
 
 function onMessage(msg: AltTabMessage): void {
   registerMessage(msg)
+  sourcesLastSeen.set(msg.source, Date.now())
   if (!shouldShow(msg)) return
 
   let line: string
@@ -568,12 +569,68 @@ function doCopy(rl: readline.Interface): void {
 
 // ── HTTP log API ──────────────────────────────────────────────────────────
 
+const sourcesLastSeen = new Map<string, number>()
+const markers = new Map<string, { label: string; time: number }>()
+
+// eslint-disable-next-line no-control-regex
+const stripAnsiHttp = (s: string) => s.replace(/\x1B\[[0-9;]*m/g, '')
+
+function parseSince(s: string | null): number {
+  if (!s) return 0
+  if (s.startsWith('mark_')) return markers.get(s)?.time ?? 0
+  const dm = s.match(/^(\d+)(ms|s|m|h)$/)
+  if (dm) {
+    const n = parseInt(dm[1], 10)
+    const ms = dm[2] === 'ms' ? n : dm[2] === 's' ? n * 1000 : dm[2] === 'm' ? n * 60000 : n * 3600000
+    return Date.now() - ms
+  }
+  return parseInt(s, 10) || 0
+}
+
+function normalizePath(url: string): string {
+  try { return new URL(url).pathname } catch { return url.split('?')[0] }
+}
+
+function serialize(entries: ReturnType<typeof getAllBuffer>, text = false) {
+  if (text) return entries.map((e) => stripAnsiHttp(e.rendered)).join('\n')
+  return entries.map((e) => ({ time: e.time, rendered: stripAnsiHttp(e.rendered), ...e.msg }))
+}
+
+function respond(res: ServerResponse, data: unknown, text: boolean): void {
+  if (text) {
+    res.setHeader('Content-Type', 'text/plain')
+    res.writeHead(200)
+    res.end(typeof data === 'string' ? data : JSON.stringify(data, null, 2))
+  } else {
+    res.writeHead(200)
+    res.end(JSON.stringify(data))
+  }
+}
+
 function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   const { URL } = require('node:url') as typeof import('node:url')
   const url = new URL(req.url ?? '/', `http://localhost`)
+  const fmt = url.searchParams.get('format')
+  const text = fmt === 'text'
 
   res.setHeader('Content-Type', 'application/json')
   res.setHeader('Access-Control-Allow-Origin', '*')
+
+  // ── POST /mark ───────────────────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/mark') {
+    let body = ''
+    req.on('data', (chunk) => { body += chunk })
+    req.on('end', () => {
+      let label = 'mark'
+      try { label = (JSON.parse(body) as { label?: string }).label ?? 'mark' } catch { /* ok */ }
+      const id = `mark_${Date.now()}`
+      const time = Date.now()
+      markers.set(id, { label, time })
+      res.writeHead(200)
+      res.end(JSON.stringify({ id, label, time }))
+    })
+    return
+  }
 
   if (req.method !== 'GET') {
     res.writeHead(405)
@@ -581,71 +638,241 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     return
   }
 
-  const strip = (s: string) => s.replace(/\x1B\[[0-9;]*m/g, '') // eslint-disable-line no-control-regex
   const buf = getAllBuffer()
 
-  function serialize(entries: ReturnType<typeof getAllBuffer>) {
-    return entries.map((e) => ({ time: e.time, rendered: strip(e.rendered), ...e.msg }))
-  }
-
+  // ── GET /logs ────────────────────────────────────────────────────────────
   if (url.pathname === '/logs') {
-    const source  = url.searchParams.get('source')
-    const level   = url.searchParams.get('level')
-    const type    = url.searchParams.get('type')
-    const limit   = Math.min(parseInt(url.searchParams.get('limit') ?? '200', 10), 2000)
-    let entries   = buf
+    const source = url.searchParams.get('source')
+    const level  = url.searchParams.get('level')
+    const type   = url.searchParams.get('type')
+    const since  = parseSince(url.searchParams.get('since'))
+    const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '200', 10), 2000)
+    let entries  = buf
+    if (since)  entries = entries.filter((e) => e.time >= since)
     if (source) entries = entries.filter((e) => e.msg.source === source)
     if (type === 'network') entries = entries.filter((e) => (e.msg as NetworkMessage).type === 'network')
     if (type === 'log')     entries = entries.filter((e) => (e.msg as NetworkMessage).type !== 'network')
     if (level)  entries = entries.filter((e) => (e.msg as { level?: string }).level === level)
-    res.writeHead(200)
-    res.end(JSON.stringify(serialize(entries.slice(-limit))))
+    respond(res, serialize(entries.slice(-limit), text), text)
     return
   }
 
+  // ── GET /errors ──────────────────────────────────────────────────────────
   if (url.pathname === '/errors') {
+    const since = parseSince(url.searchParams.get('since'))
     const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 500)
-    const errors = buf.filter((e) => {
+    let entries = buf.filter((e) => {
       const m = e.msg as { level?: string; type?: string; status?: number }
       return m.level === 'error' || (m.type === 'network' && (m.status ?? 0) >= 500)
     })
-    res.writeHead(200)
-    res.end(JSON.stringify(serialize(errors.slice(-limit))))
+    if (since) entries = entries.filter((e) => e.time >= since)
+    respond(res, serialize(entries.slice(-limit), text), text)
     return
   }
 
+  // ── GET /network ─────────────────────────────────────────────────────────
   if (url.pathname === '/network') {
     const source    = url.searchParams.get('source')
     const minStatus = parseInt(url.searchParams.get('status') ?? '0', 10)
+    const since     = parseSince(url.searchParams.get('since'))
     const limit     = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 1000)
     let entries = buf.filter((e) => (e.msg as NetworkMessage).type === 'network')
-    if (source) entries = entries.filter((e) => e.msg.source === source)
+    if (since)     entries = entries.filter((e) => e.time >= since)
+    if (source)    entries = entries.filter((e) => e.msg.source === source)
     if (minStatus) entries = entries.filter((e) => ((e.msg as NetworkMessage).status ?? 0) >= minStatus)
-    res.writeHead(200)
-    res.end(JSON.stringify(serialize(entries.slice(-limit))))
+    respond(res, serialize(entries.slice(-limit), text), text)
     return
   }
 
+  // ── GET /summary ─────────────────────────────────────────────────────────
   if (url.pathname === '/summary') {
-    const sources = Array.from(filterState.knownSources.entries()).map(([name, counts]) => ({ name, ...counts }))
+    const sources = Array.from(filterState.knownSources.entries()).map(([name, counts]) => ({
+      name, ...counts,
+      lastSeen: sourcesLastSeen.get(name) ?? null,
+    }))
     const errorCount = buf.filter((e) => {
       const m = e.msg as { level?: string; type?: string; status?: number }
       return m.level === 'error' || (m.type === 'network' && (m.status ?? 0) >= 500)
     }).length
-    res.writeHead(200)
-    res.end(JSON.stringify({ sources, total: buf.length, errors: errorCount, port: PORT }))
+    respond(res, { sources, total: buf.length, errors: errorCount, port: PORT }, text)
     return
   }
 
-  res.writeHead(200)
-  res.end(JSON.stringify({
+  // ── GET /sources ─────────────────────────────────────────────────────────
+  if (url.pathname === '/sources') {
+    const now = Date.now()
+    const window1m = now - 60000
+    const sources = Array.from(filterState.knownSources.entries()).map(([name, counts]) => {
+      const msgs = buf.filter((e) => e.msg.source === name)
+      const recent = msgs.filter((e) => e.time >= window1m)
+      const errors = msgs.filter((e) => {
+        const m = e.msg as { level?: string; type?: string; status?: number }
+        return m.level === 'error' || (m.type === 'network' && (m.status ?? 0) >= 500)
+      })
+      return {
+        name,
+        logs: counts.logs,
+        network: counts.network,
+        errors: errors.length,
+        lastSeen: sourcesLastSeen.get(name) ?? null,
+        msgsPerMin: recent.length,
+      }
+    })
+    respond(res, sources, text)
+    return
+  }
+
+  // ── GET /timeline ─────────────────────────────────────────────────────────
+  if (url.pathname === '/timeline') {
+    const since  = parseSince(url.searchParams.get('since') ?? '5m')
+    const source = url.searchParams.get('source')
+    const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '500', 10), 2000)
+    let entries  = buf.filter((e) => e.time >= since)
+    if (source) entries = entries.filter((e) => e.msg.source === source)
+    respond(res, serialize(entries.slice(-limit), text), text)
+    return
+  }
+
+  // ── GET /search ──────────────────────────────────────────────────────────
+  if (url.pathname === '/search') {
+    const q      = url.searchParams.get('q') ?? ''
+    const source = url.searchParams.get('source')
+    const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 1000)
+    if (!q) { res.writeHead(400); res.end(JSON.stringify({ error: 'q param required' })); return }
+    const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+    let entries = buf.filter((e) => re.test(stripAnsiHttp(e.rendered)))
+    if (source) entries = entries.filter((e) => e.msg.source === source)
+    respond(res, serialize(entries.slice(-limit), text), text)
+    return
+  }
+
+  // ── GET /slow ────────────────────────────────────────────────────────────
+  if (url.pathname === '/slow') {
+    const threshold = parseInt(url.searchParams.get('ms') ?? '500', 10)
+    const source    = url.searchParams.get('source')
+    const limit     = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 500)
+    let entries = buf.filter((e) => {
+      const n = e.msg as NetworkMessage
+      return n.type === 'network' && n.duration >= threshold
+    })
+    if (source) entries = entries.filter((e) => e.msg.source === source)
+    entries = [...entries].sort((a, b) => (b.msg as NetworkMessage).duration - (a.msg as NetworkMessage).duration)
+    respond(res, serialize(entries.slice(0, limit), text), text)
+    return
+  }
+
+  // ── GET /repeat ──────────────────────────────────────────────────────────
+  if (url.pathname === '/repeat') {
+    const since  = parseSince(url.searchParams.get('since') ?? '5m')
+    const source = url.searchParams.get('source')
+    const min    = parseInt(url.searchParams.get('min') ?? '2', 10)
+    let entries  = buf.filter((e) => e.time >= since)
+    if (source) entries = entries.filter((e) => e.msg.source === source)
+    const counts = new Map<string, { count: number; source: string; lastSeen: number; rendered: string }>()
+    for (const e of entries) {
+      const key = e.msg.source + ':' + stripAnsiHttp(e.rendered).trim()
+      const ex = counts.get(key)
+      if (ex) { ex.count++; ex.lastSeen = e.time }
+      else counts.set(key, { count: 1, source: e.msg.source, lastSeen: e.time, rendered: stripAnsiHttp(e.rendered).trim() })
+    }
+    const repeated = [...counts.values()]
+      .filter((v) => v.count >= min)
+      .sort((a, b) => b.count - a.count)
+    respond(res, repeated, text)
+    return
+  }
+
+  // ── GET /context ─────────────────────────────────────────────────────────
+  if (url.pathname === '/context') {
+    const at     = parseInt(url.searchParams.get('at') ?? '0', 10)
+    const window = parseInt(url.searchParams.get('window') ? parseSince(url.searchParams.get('window')) === 0 ? '10000' : String(Date.now() - parseSince(url.searchParams.get('window')!)) : '10000', 10)
+    const source = url.searchParams.get('source')
+    if (!at) { res.writeHead(400); res.end(JSON.stringify({ error: 'at= (unix ms timestamp) required' })); return }
+    const halfWindow = window / 2
+    let entries = buf.filter((e) => e.time >= at - halfWindow && e.time <= at + halfWindow)
+    if (source) entries = entries.filter((e) => e.msg.source === source)
+    respond(res, serialize(entries, text), text)
+    return
+  }
+
+  // ── GET /trace ────────────────────────────────────────────────────────────
+  if (url.pathname === '/trace') {
+    const targetPath = url.searchParams.get('url')
+    const method     = (url.searchParams.get('method') ?? '').toUpperCase()
+    const limit      = Math.min(parseInt(url.searchParams.get('limit') ?? '10', 10), 50)
+    if (!targetPath) { res.writeHead(400); res.end(JSON.stringify({ error: 'url= param required' })); return }
+
+    const netEntries = buf.filter((e) => {
+      const n = e.msg as NetworkMessage
+      if (n.type !== 'network') return false
+      if (normalizePath(n.url) !== normalizePath(targetPath)) return false
+      if (method && n.method.toUpperCase() !== method) return false
+      return true
+    })
+
+    // Pair outgoing (frontend) with incoming (backend) by time proximity
+    const outgoing = netEntries.filter((e) => (e.msg as NetworkMessage).direction === 'outgoing')
+    const incoming = netEntries.filter((e) => (e.msg as NetworkMessage).direction === 'incoming')
+
+    const chains = outgoing.slice(-limit).map((out) => {
+      const outMsg = out.msg as NetworkMessage
+      // Find the closest incoming within 3s
+      const match = incoming.find((inc) => Math.abs(inc.time - out.time) < 3000)
+      const incMsg = match ? (match.msg as NetworkMessage) : null
+      const start = out.time
+      const end   = match ? match.time + (incMsg?.duration ?? 0) : out.time + (outMsg.duration ?? 0)
+      // Logs that fired between request start and end+200ms
+      const logs = buf.filter((e) => {
+        const n = e.msg as NetworkMessage
+        if (n.type === 'network') return false
+        return e.time >= start && e.time <= end + 200
+      })
+      return {
+        method: outMsg.method.toUpperCase(),
+        url: targetPath,
+        frontend: {
+          source: outMsg.source,
+          time: out.time,
+          status: outMsg.status,
+          duration: outMsg.duration,
+          responseSize: outMsg.responseSize,
+        },
+        backend: incMsg ? {
+          source: incMsg.source,
+          time: match!.time,
+          status: incMsg.status,
+          duration: incMsg.duration,
+        } : null,
+        logs: logs.map((e) => ({
+          source: e.msg.source,
+          message: (e.msg as { message?: string }).message ?? '',
+          time: e.time,
+        })),
+      }
+    })
+
+    respond(res, chains, text)
+    return
+  }
+
+  // ── GET / ─────────────────────────────────────────────────────────────────
+  respond(res, {
     endpoints: {
-      '/logs':    'GET  ?source= &level= &type=log|network &limit=200',
-      '/errors':  'GET  ?limit=50   — error logs + 5xx responses',
-      '/network': 'GET  ?source= &status= &limit=100',
-      '/summary': 'GET  — connected sources + counts',
+      '/logs':     'GET  ?source= &level= &type=log|network &since=30s &limit=200',
+      '/errors':   'GET  ?since= &limit=50',
+      '/network':  'GET  ?source= &status= &since= &limit=100',
+      '/summary':  'GET  — sources + counts',
+      '/sources':  'GET  — per-source health: errors, rate, lastSeen',
+      '/timeline': 'GET  ?since=5m &source= &limit=500',
+      '/search':   'GET  ?q=text &source= &limit=100',
+      '/slow':     'GET  ?ms=500 &source= &limit=50',
+      '/repeat':   'GET  ?since=5m &source= &min=2',
+      '/context':  'GET  ?at=<unix_ms> &window=10s',
+      '/trace':    'GET  ?url=/api/path &method=GET &limit=10',
+      '/mark':     'POST { label } → { id, time }  — then use ?since=mark_<id>',
     },
-  }))
+    tip: 'Add ?format=text to any endpoint for plain text output',
+  }, text)
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────
