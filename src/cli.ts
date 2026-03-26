@@ -2,7 +2,7 @@ import readline from 'node:readline'
 import { execSync } from 'node:child_process'
 import pc from 'picocolors'
 import { createServer } from './server'
-import { formatLog, formatNetwork, formatSeparator, formatBanner, formatFocusChange } from './formatter'
+import { formatLog, formatNetwork, formatNetworkCompact, formatSeparator, formatBanner, formatFocusChange } from './formatter'
 import { filterState, registerMessage, shouldShow, openFilterMenu } from './filter'
 import { appendToBuffer, exportSession, bufferSize, getRecentBuffer } from './export'
 import { loadConfig, runSetupWizard } from './setup'
@@ -15,78 +15,311 @@ const TIMESTAMPS = process.env.TABLOG_TIMESTAMPS === '1'
 // ── Output queue (paused during /change menu) ─────────────────────────────
 
 let outputPaused = false
-const outputQueue: Array<{ line: string; source?: string }> = []
+const outputQueue: Array<{ line: string; msg?: AltTabMessage }> = []
 
 // ── Split-column view ──────────────────────────────────────────────────────
 
-const SPLIT_LINES = 22
+const SPLIT_LINES = 20
 const columnBuffers = new Map<string, string[]>()
 let splitInitialized = false
+let focusedCol = 0
+const scrollOffset = new Map<string, number>()
+let splitCmdBuf = ''
+let currentRl: readline.Interface | null = null
 
 function stripAnsiLocal(s: string): string {
   // eslint-disable-next-line no-control-regex
   return s.replace(/\x1B\[[0-9;]*m/g, '')
 }
 
+/** Truncate an ANSI-colored string to maxWidth visible characters. */
+function truncateAnsi(s: string, maxWidth: number): string {
+  let visible = 0
+  let i = 0
+  let result = ''
+  while (i < s.length) {
+    if (s[i] === '\x1B') {
+      const start = i++
+      while (i < s.length && s[i] !== 'm') i++
+      i++
+      result += s.slice(start, i)
+    } else {
+      if (visible >= maxWidth) break
+      result += s[i++]
+      visible++
+    }
+  }
+  return result + '\x1B[0m'
+}
+
 function padVisual(s: string, width: number): string {
   const vis = stripAnsiLocal(s)
-  if (vis.length > width) return vis.slice(0, width)
+  if (vis.length > width) return truncateAnsi(s, width)
   return s + ' '.repeat(width - vis.length)
 }
 
-function renderSplitView(): void {
-  const sources = filterState.splitSources!
-  const numCols = sources.length
-  const termWidth = process.stdout.columns || 120
-  const colWidth = Math.floor((termWidth - (numCols - 1)) / numCols)
-  const totalLines = SPLIT_LINES + 1  // header + content
-
-  if (splitInitialized) {
-    process.stdout.write(`\x1B[${totalLines}A\x1B[0J`)
-  } else {
-    process.stdout.write('\n'.repeat(totalLines))
-    process.stdout.write(`\x1B[${totalLines}A\x1B[0J`)
-    splitInitialized = true
+/** Break a colored line into rows that fit within colWidth. First row keeps ANSI colors. */
+function wrapEntry(line: string, colWidth: number): string[] {
+  const vis = stripAnsiLocal(line)
+  if (vis.length <= colWidth) return [line]
+  const rows: string[] = [truncateAnsi(line, colWidth)]
+  const indent = '  '
+  let remaining = vis.slice(colWidth)
+  const w = Math.max(1, colWidth - indent.length)
+  while (remaining.length > 0) {
+    rows.push(indent + remaining.slice(0, w))
+    remaining = remaining.slice(w)
   }
-
-  // Header
-  const headerCells = sources.map((s) => {
-    const title = `- ${s} `
-    const dashes = '-'.repeat(Math.max(0, colWidth - title.length))
-    return pc.dim(title + dashes)
-  })
-  process.stdout.write(headerCells.join(pc.dim('+')) + '\n')
-
-  // Content rows
-  for (let row = 0; row < SPLIT_LINES; row++) {
-    const cells = sources.map((s) => {
-      const buf = columnBuffers.get(s) ?? []
-      const lineIdx = buf.length - SPLIT_LINES + row
-      const line = lineIdx >= 0 ? (buf[lineIdx] ?? '') : ''
-      return padVisual(line, colWidth)
-    })
-    process.stdout.write(cells.join(pc.dim('|')) + '\n')
-  }
+  return rows
 }
 
-function writeLineSplit(source: string, line: string): void {
-  if (!columnBuffers.has(source)) columnBuffers.set(source, [])
-  const buf = columnBuffers.get(source)!
-  buf.push(stripAnsiLocal(line))
-  if (buf.length > SPLIT_LINES * 3) buf.splice(0, buf.length - SPLIT_LINES)
+function getSplitGeometry() {
+  const termWidth = process.stdout.columns || 120
+  const termHeight = process.stdout.rows || 24
+  const contentLines = Math.min(SPLIT_LINES, Math.max(4, termHeight - 6))
+  const totalLines = contentLines + 2  // header + content + command row
+  const splitStartRow = termHeight - totalLines + 1  // 1-indexed
+  const scrollRegionEnd = splitStartRow - 1
+  return { termWidth, termHeight, contentLines, totalLines, splitStartRow, scrollRegionEnd }
+}
+
+function renderSplitView(): void {
+  if (!filterState.splitSources) return
+  const sources = filterState.splitSources
+  const numCols = sources.length
+  const { termWidth, contentLines, splitStartRow } = getSplitGeometry()
+  const colWidth = Math.floor((termWidth - (numCols - 1)) / numCols)
+
+  // Save cursor → jump to split panel start
+  process.stdout.write('\x1B[s')
+  process.stdout.write(`\x1B[${splitStartRow};1H`)
+
+  // Header row — focused column shown in cyan bold, scroll offset shown if > 0
+  const headerCells = sources.map((s, i) => {
+    const isFocused = i === focusedCol
+    const offset = scrollOffset.get(s) ?? 0
+    const scrollStr = offset > 0 ? ` [+${offset}]` : ''
+    const marker = isFocused ? '> ' : '- '
+    const title = `${marker}${s}${scrollStr} `
+    const dashes = '-'.repeat(Math.max(0, colWidth - title.length))
+    return isFocused ? pc.bold(pc.cyan(title + dashes)) : pc.dim(title + dashes)
+  })
+  process.stdout.write('\x1B[2K' + headerCells.join(pc.dim('+')) + '\n')
+
+  // Flatten buffer entries into display rows (with wrapping), applying scroll offset
+  const flatRows = new Map<string, string[]>()
+  for (const s of sources) {
+    const buf = columnBuffers.get(s) ?? []
+    const allRows: string[] = []
+    for (const entry of buf) allRows.push(...wrapEntry(entry, colWidth))
+    const offset = scrollOffset.get(s) ?? 0
+    const endIdx = Math.max(0, allRows.length - offset)
+    const startIdx = Math.max(0, endIdx - contentLines)
+    const visibleRows = allRows.slice(startIdx, endIdx)
+    while (visibleRows.length < contentLines) visibleRows.unshift('')
+    flatRows.set(s, visibleRows)
+  }
+
+  // Content rows
+  for (let row = 0; row < contentLines; row++) {
+    const cells = sources.map((s) => {
+      const rows = flatRows.get(s) ?? []
+      return padVisual(rows[row] ?? '', colWidth)
+    })
+    process.stdout.write('\x1B[2K' + cells.join(pc.dim('|')) + '\n')
+  }
+
+  // Command input row
+  const cmdLine = splitCmdBuf
+    ? pc.dim('> ') + splitCmdBuf + pc.dim('_')
+    : pc.dim('> arrows scroll/focus  tab switch col  /split off to exit')
+  process.stdout.write('\x1B[2K' + cmdLine + '\n')
+
+  // Restore cursor (back into the streaming scroll region)
+  process.stdout.write('\x1B[u')
+}
+
+function scrollFocused(delta: number): void {
+  if (!filterState.splitSources) return
+  const source = filterState.splitSources[focusedCol]
+  if (!source) return
+  const current = scrollOffset.get(source) ?? 0
+  scrollOffset.set(source, Math.max(0, current + delta))
   renderSplitView()
 }
 
-function writeLine(line: string, source?: string): void {
-  if (outputPaused) {
-    outputQueue.push({ line, source })
+function handleSplitCmd(cmd: string): void {
+  const cmdLower = cmd.toLowerCase()
+
+  if (cmdLower === '/export') {
+    doExport(); renderSplitView(); return
+  }
+
+  if (cmdLower.startsWith('/tab')) {
+    const arg = cmd.slice(4).trim()
+    const sources = Array.from(filterState.knownSources.keys())
+    if (!arg || arg === '0' || arg.toLowerCase() === 'all') {
+      filterState.focusedSource = null
+    } else {
+      const n = parseInt(arg, 10)
+      filterState.focusedSource = !isNaN(n)
+        ? (sources[n - 1] ?? null)
+        : (sources.find((s) => s.toLowerCase() === arg.toLowerCase()) ?? null)
+    }
+    writeLine(formatFocusChange(filterState.focusedSource))
+    renderSplitView(); return
+  }
+
+  if (cmdLower.startsWith('/split')) {
+    const arg = cmd.slice(6).trim()
+    const argLower = arg.toLowerCase()
+    if (!arg || argLower === 'off') {
+      filterState.splitSources = null
+      columnBuffers.clear()
+      exitSplitMode()  // exits raw mode, resumes rl
+      return
+    }
+    const sources = Array.from(filterState.knownSources.keys())
+    const tokens = arg.split(/[\s,]+/)
+    let selected: string[]
+    if (tokens.length === 1 && /^\d$/.test(tokens[0])) {
+      selected = sources.slice(0, Math.min(parseInt(tokens[0], 10), 3))
+    } else {
+      selected = tokens.map((a) => {
+        const n = parseInt(a, 10)
+        return !isNaN(n) ? sources[n - 1] : sources.find((s) => s.toLowerCase() === a.toLowerCase())
+      }).filter((s): s is string => !!s)
+    }
+    if (selected.length >= 2) {
+      exitSplitMode()
+      columnBuffers.clear()
+      filterState.splitSources = selected
+      enterSplitMode()
+    } else {
+      writeLine(pc.dim('  need at least 2 sources'))
+      renderSplitView()
+    }
     return
   }
-  if (filterState.splitSources && source && filterState.splitSources.includes(source)) {
-    writeLineSplit(source, line)
+
+  writeLine(pc.dim(`  not available in split mode — try /export /tab /split off`))
+  renderSplitView()
+}
+
+function onSplitKey(raw: Buffer | string): void {
+  const key = Buffer.isBuffer(raw) ? raw.toString('utf8') : raw
+
+  if (key === '\u0003') { process.exit(0) }
+
+  // Scroll: Up/Down arrows
+  if (key === '\x1B[A') { scrollFocused(3); return }
+  if (key === '\x1B[B') { scrollFocused(-3); return }
+  // PgUp / PgDn
+  if (key === '\x1B[5~') { scrollFocused(10); return }
+  if (key === '\x1B[6~') { scrollFocused(-10); return }
+  // Focus: Left/Right arrows or Tab
+  if (key === '\x1B[D' || key === '\t') {
+    focusedCol = (focusedCol - 1 + (filterState.splitSources?.length ?? 1)) % (filterState.splitSources?.length ?? 1)
+    renderSplitView(); return
+  }
+  if (key === '\x1B[C') {
+    focusedCol = (focusedCol + 1) % (filterState.splitSources?.length ?? 1)
+    renderSplitView(); return
+  }
+
+  // Enter: execute command buffer
+  if (key === '\r' || key === '\n') {
+    const cmd = splitCmdBuf.trim()
+    splitCmdBuf = ''
+    if (cmd) handleSplitCmd(cmd)
+    else renderSplitView()
     return
   }
+
+  // Backspace
+  if (key === '\x7f' || key === '\b') {
+    splitCmdBuf = splitCmdBuf.slice(0, -1)
+    renderSplitView(); return
+  }
+
+  // Printable chars
+  if (key.length === 1 && key >= ' ') {
+    splitCmdBuf += key
+    renderSplitView()
+  }
+}
+
+function enterSplitMode(): void {
+  focusedCol = 0
+  splitCmdBuf = ''
+  scrollOffset.clear()
+  const { scrollRegionEnd } = getSplitGeometry()
+  // Restrict scrolling to above the split panel
+  process.stdout.write(`\x1B[1;${scrollRegionEnd}r`)
+  // Position cursor at bottom of streaming region
+  process.stdout.write(`\x1B[${scrollRegionEnd};1H`)
+  if (process.stdin.isTTY) {
+    currentRl?.pause()
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.on('data', onSplitKey)
+  }
+  splitInitialized = true
+  renderSplitView()
+}
+
+function exitSplitMode(): void {
+  process.stdin.removeListener('data', onSplitKey)
+  if (process.stdin.isTTY) process.stdin.setRawMode(false)
+  currentRl?.resume()
+  const { splitStartRow } = getSplitGeometry()
+  // Restore full scroll region
+  process.stdout.write('\x1B[r')
+  // Clear the split panel area
+  process.stdout.write(`\x1B[${splitStartRow};1H\x1B[0J`)
+  splitInitialized = false
+  scrollOffset.clear()
+  focusedCol = 0
+  splitCmdBuf = ''
+}
+
+function writeLineSplit(msg: AltTabMessage): void {
+  const source = msg.source
+  if (!columnBuffers.has(source)) columnBuffers.set(source, [])
+  const buf = columnBuffers.get(source)!
+
+  let line: string
+  if ((msg as NetworkMessage).type === 'network') {
+    const n = msg as NetworkMessage
+    const size = n.responseSize >= 0 ? n.responseSize : n.requestSize
+    const matchedSource = handleCorrelation(n)
+    line = formatNetworkCompact(n.source, n.method, n.url, n.status, n.duration, size, matchedSource)
+  } else {
+    const l = msg as { source: string; message: string; level?: string }
+    line = formatLog(l.source, l.message, l.level)
+  }
+
+  // formatLog embeds \n for streaming wrapping — flatten to a single line
+  // so wrapEntry can re-wrap cleanly at the column width
+  const flatLine = line.replace(/\n\s*/g, ' ')
+
+  buf.push(flatLine)
+  if (buf.length > (SPLIT_LINES + 1) * 3) buf.splice(0, buf.length - SPLIT_LINES - 1)
+  renderSplitView()
+}
+
+function writeLine(line: string): void {
+  if (outputPaused) { outputQueue.push({ line }); return }
   process.stdout.write(line + '\n')
+}
+
+function writeMessage(msg: AltTabMessage, line: string): void {
+  if (outputPaused) { outputQueue.push({ line, msg }); return }
+  if (filterState.splitSources?.includes(msg.source)) {
+    writeLineSplit(msg)
+  } else {
+    process.stdout.write(line + '\n')
+  }
 }
 
 function pauseOutput(): void {
@@ -95,9 +328,9 @@ function pauseOutput(): void {
 
 function resumeOutput(): void {
   outputPaused = false
-  for (const { line, source } of outputQueue) {
-    if (filterState.splitSources && source && filterState.splitSources.includes(source)) {
-      writeLineSplit(source, line)
+  for (const { line, msg } of outputQueue) {
+    if (msg && filterState.splitSources?.includes(msg.source)) {
+      writeLineSplit(msg)
     } else {
       process.stdout.write(line + '\n')
     }
@@ -161,7 +394,8 @@ function onMessage(msg: AltTabMessage): void {
 
   if ((msg as NetworkMessage).type === 'network') {
     const n = msg as NetworkMessage
-    const matchedSource = handleCorrelation(n)
+    // In split mode, handleCorrelation is called inside writeLineSplit — skip here
+    const matchedSource = filterState.splitSources?.includes(n.source) ? undefined : handleCorrelation(n)
     line = ts() + formatNetwork(
       n.source, n.method, n.url, n.status,
       n.duration, n.responseSize, n.requestSize,
@@ -173,7 +407,7 @@ function onMessage(msg: AltTabMessage): void {
   }
 
   appendToBuffer(msg, line)
-  writeLine(line, msg.source)
+  writeMessage(msg, line)
 }
 
 // ── Export helper ─────────────────────────────────────────────────────────
@@ -368,6 +602,7 @@ async function main(): Promise<void> {
       output: process.stdout,
       terminal: false,
     })
+    currentRl = rl
 
     rl.on('line', (line: string) => {
       const cmd = line.trim()
@@ -400,40 +635,53 @@ async function main(): Promise<void> {
       } else if (cmdLower.startsWith('/split')) {
         const arg = cmd.slice(6).trim()
         const argLower = arg.toLowerCase()
-        if (!arg || argLower === 'off' || argLower === '0') {
-          if (argLower === 'off' || argLower === '0') {
+        const sources = Array.from(filterState.knownSources.keys())
+
+        if (!arg || argLower === 'off') {
+          // /split off → exit; /split alone → toggle
+          if (filterState.splitSources || argLower === 'off') {
             filterState.splitSources = null
-            splitInitialized = false
             columnBuffers.clear()
-            writeLine(formatFocusChange(null))
+            exitSplitMode()
           } else {
-            // /split with no args — split all known sources
-            const sources = Array.from(filterState.knownSources.keys())
             if (sources.length < 2) {
-              process.stdout.write(pc.dim('  /split needs at least 2 connected sources\n'))
+              process.stdout.write(pc.dim('  no sources connected yet\n'))
             } else {
-              filterState.splitSources = sources.slice(0, 3)  // max 3 columns
-              splitInitialized = false
               columnBuffers.clear()
+              filterState.splitSources = sources.slice(0, 3)
+              enterSplitMode()
             }
           }
         } else {
-          const sources = Array.from(filterState.knownSources.keys())
-          const selected = arg.split(/[\s,]+/).map((a) => {
-            const n = parseInt(a, 10)
-            return !isNaN(n)
-              ? sources[n - 1]
-              : sources.find((s) => s.toLowerCase() === a.toLowerCase())
-          }).filter((s): s is string => !!s)
+          // /split 2   → pick first 2 sources by count
+          // /split 1 2 → pick sources by index
+          // /split react fastapi → pick by name
+          const tokens = arg.split(/[\s,]+/)
+          let selected: string[]
+
+          if (tokens.length === 1 && /^\d$/.test(tokens[0])) {
+            // Single digit = number of columns
+            const n = Math.min(parseInt(tokens[0], 10), 3)
+            selected = sources.slice(0, n)
+          } else {
+            selected = tokens.map((a) => {
+              const n = parseInt(a, 10)
+              return !isNaN(n)
+                ? sources[n - 1]
+                : sources.find((s) => s.toLowerCase() === a.toLowerCase())
+            }).filter((s): s is string => !!s)
+          }
+
           if (selected.length < 2) {
             const list = sources.length
               ? sources.map((s, i) => `  ${pc.dim(`[${i + 1}]`)}  ${s}`).join('\n')
               : pc.dim('  no sources connected yet')
-            process.stdout.write(`${list}\n`)
+            process.stdout.write(`${list}\n  usage: /split 2  or  /split react fastapi\n`)
           } else {
-            filterState.splitSources = selected.slice(0, 3)
-            splitInitialized = false
+            if (filterState.splitSources) exitSplitMode()
             columnBuffers.clear()
+            filterState.splitSources = selected
+            enterSplitMode()
           }
         }
       }

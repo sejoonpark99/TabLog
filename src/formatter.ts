@@ -132,6 +132,25 @@ export function formatSeparator(source: string, event: 'connected' | 'disconnect
   return pc.dim(`── ${text}${dashes} ${now}`)
 }
 
+// ── Compact network line (for split-column view) ──────────────────────────
+
+export function formatNetworkCompact(
+  source: string,
+  method: string,
+  url: string,
+  status: number,
+  duration: number,
+  size: number,
+  matchedSource?: string,
+): string {
+  const lbl = label(source)
+  const methodStr = pc.bold(method.toUpperCase().padEnd(4))
+  const maxUrl = 26
+  const displayUrl = url.length > maxUrl ? `${url.slice(0, maxUrl - 1)}…` : url
+  const match = matchedSource ? `  ${pc.dim('<>')} ${getColor(matchedSource)(matchedSource)}` : ''
+  return `${lbl}  ${fmtStatus(status)}  ${methodStr} ${displayUrl}  ${fmtDuration(duration)}  ${pc.dim(fmtSize(size).padStart(5))}${match}`
+}
+
 // ── Tab focus change ──────────────────────────────────────────────────────
 
 export function formatFocusChange(source: string | null): string {
