@@ -8,10 +8,12 @@ interface BufferedEntry {
   time: number
 }
 
+const MAX_BUFFER = 10000
 const sessionBuffer: BufferedEntry[] = []
 
 export function appendToBuffer(msg: AltTabMessage, rendered: string): void {
   sessionBuffer.push({ msg, rendered, time: Date.now() })
+  if (sessionBuffer.length > MAX_BUFFER) sessionBuffer.splice(0, sessionBuffer.length - MAX_BUFFER)
 }
 
 function stripAnsi(str: string): string {

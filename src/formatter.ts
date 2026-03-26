@@ -86,7 +86,8 @@ export function formatLog(source: string, message: string, level?: string, file?
   const col = lblLen + 2
   const termWidth = process.stdout.columns || 120
   const msgWidth = termWidth - col
-  const caller = file ? pc.dim(` ${file}:${line}`) : ''
+  const basename = file ? (file.split(/[\\/]/).pop() ?? file) : ''
+  const caller = basename ? pc.dim(` ${basename}:${line}`) : ''
   let text: string
   switch (level) {
     case 'error': text = pc.red(`● ${wrapMessage(message, msgWidth - 2, col + 2)}`); break

@@ -572,14 +572,20 @@ function doCopy(rl: readline.Interface): void {
 // ── HTTP log API ──────────────────────────────────────────────────────────
 
 const sourcesLastSeen = new Map<string, number>()
+const connectedSources = new Set<string>()
 const markers = new Map<string, { label: string; time: number }>()
 
 // eslint-disable-next-line no-control-regex
 const stripAnsiHttp = (s: string) => s.replace(/\x1B\[[0-9;]*m/g, '')
 
+const MARK_NOT_FOUND = -1
+
 function parseSince(s: string | null): number {
   if (!s) return 0
-  if (s.startsWith('mark_')) return markers.get(s)?.time ?? 0
+  if (s.startsWith('mark_')) {
+    const t = markers.get(s)?.time
+    return t !== undefined ? t : MARK_NOT_FOUND
+  }
   const dm = s.match(/^(\d+)(ms|s|m|h)$/)
   if (dm) {
     const n = parseInt(dm[1], 10)
@@ -587,6 +593,21 @@ function parseSince(s: string | null): number {
     return Date.now() - ms
   }
   return parseInt(s, 10) || 0
+}
+
+/** Parse a ?limit= or ?n= param, clamped to [1, max]. Negative/zero/NaN → default. */
+function parseLimit(s: string | null, def: number, max: number): number {
+  const n = parseInt(s ?? '', 10)
+  return Math.min(Math.max(Number.isFinite(n) && n > 0 ? n : def, 1), max)
+}
+
+/** Parse a duration string like "10s", "2m", "500ms" → milliseconds. Returns defaultMs on parse failure. */
+function parseDuration(s: string | null, defaultMs: number): number {
+  if (!s) return defaultMs
+  const m = s.match(/^(\d+(?:\.\d+)?)(ms|s|m|h)$/)
+  if (!m) return parseInt(s, 10) || defaultMs
+  const n = parseFloat(m[1])
+  return m[2] === 'ms' ? n : m[2] === 's' ? n * 1000 : m[2] === 'm' ? n * 60000 : n * 3600000
 }
 
 function normalizePath(url: string): string {
@@ -624,9 +645,12 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     req.on('data', (chunk) => { body += chunk })
     req.on('end', () => {
       let label = 'mark'
-      try { label = (JSON.parse(body) as { label?: string }).label ?? 'mark' } catch { /* ok */ }
-      const id = `mark_${Date.now()}`
+      if (body) {
+        try { label = (JSON.parse(body) as { label?: string }).label ?? 'mark' }
+        catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON body' })); return }
+      }
       const time = Date.now()
+      const id = `mark_${time}_${markers.size}`
       markers.set(id, { label, time })
       res.writeHead(200)
       res.end(JSON.stringify({ id, label, time }))
@@ -648,7 +672,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     const level  = url.searchParams.get('level')
     const type   = url.searchParams.get('type')
     const since  = parseSince(url.searchParams.get('since'))
-    const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '200', 10), 2000)
+    const limit  = parseLimit(url.searchParams.get('n') ?? url.searchParams.get('limit'), 200, 2000)
     let entries  = buf
     if (since)  entries = entries.filter((e) => e.time >= since)
     if (source) entries = entries.filter((e) => e.msg.source === source)
@@ -661,13 +685,15 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
 
   // ── GET /errors ──────────────────────────────────────────────────────────
   if (url.pathname === '/errors') {
-    const since = parseSince(url.searchParams.get('since'))
-    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 500)
+    const source = url.searchParams.get('source')
+    const since  = parseSince(url.searchParams.get('since'))
+    const limit  = parseLimit(url.searchParams.get('limit'), 50, 500)
     let entries = buf.filter((e) => {
       const m = e.msg as { level?: string; type?: string; status?: number }
       return m.level === 'error' || (m.type === 'network' && (m.status ?? 0) >= 500)
     })
-    if (since) entries = entries.filter((e) => e.time >= since)
+    if (since)  entries = entries.filter((e) => e.time >= since)
+    if (source) entries = entries.filter((e) => e.msg.source === source)
     respond(res, serialize(entries.slice(-limit), text), text)
     return
   }
@@ -675,13 +701,14 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   // ── GET /network ─────────────────────────────────────────────────────────
   if (url.pathname === '/network') {
     const source    = url.searchParams.get('source')
-    const minStatus = parseInt(url.searchParams.get('status') ?? '0', 10)
+    const statusStr = url.searchParams.get('status')
+    const statusN   = statusStr !== null && statusStr !== '' ? parseInt(statusStr, 10) : null
     const since     = parseSince(url.searchParams.get('since'))
-    const limit     = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 1000)
+    const limit     = parseLimit(url.searchParams.get('limit'), 100, 1000)
     let entries = buf.filter((e) => (e.msg as NetworkMessage).type === 'network')
-    if (since)     entries = entries.filter((e) => e.time >= since)
-    if (source)    entries = entries.filter((e) => e.msg.source === source)
-    if (minStatus) entries = entries.filter((e) => ((e.msg as NetworkMessage).status ?? 0) >= minStatus)
+    if (since)                              entries = entries.filter((e) => e.time >= since)
+    if (source)                             entries = entries.filter((e) => e.msg.source === source)
+    if (statusN !== null && !isNaN(statusN)) entries = entries.filter((e) => ((e.msg as NetworkMessage).status ?? 0) === statusN)
     respond(res, serialize(entries.slice(-limit), text), text)
     return
   }
@@ -713,6 +740,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
       })
       return {
         name,
+        connected: connectedSources.has(name),
         logs: counts.logs,
         network: counts.network,
         errors: errors.length,
@@ -726,9 +754,15 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
 
   // ── GET /timeline ─────────────────────────────────────────────────────────
   if (url.pathname === '/timeline') {
-    const since  = parseSince(url.searchParams.get('since') ?? '5m')
+    const sinceRaw = url.searchParams.get('since') ?? '5m'
+    const since    = parseSince(sinceRaw)
+    if (since === MARK_NOT_FOUND) {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: `Mark not found: ${sinceRaw}` }))
+      return
+    }
     const source = url.searchParams.get('source')
-    const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '500', 10), 2000)
+    const limit  = parseLimit(url.searchParams.get('limit'), 500, 2000)
     let entries  = buf.filter((e) => e.time >= since)
     if (source) entries = entries.filter((e) => e.msg.source === source)
     respond(res, serialize(entries.slice(-limit), text), text)
@@ -739,11 +773,14 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   if (url.pathname === '/search') {
     const q      = url.searchParams.get('q') ?? ''
     const source = url.searchParams.get('source')
-    const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 1000)
+    const type   = url.searchParams.get('type')
+    const limit  = parseLimit(url.searchParams.get('limit'), 100, 1000)
     if (!q) { res.writeHead(400); res.end(JSON.stringify({ error: 'q param required' })); return }
     const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
     let entries = buf.filter((e) => re.test(stripAnsiHttp(e.rendered)))
     if (source) entries = entries.filter((e) => e.msg.source === source)
+    if (type === 'network') entries = entries.filter((e) => (e.msg as NetworkMessage).type === 'network')
+    if (type === 'log')     entries = entries.filter((e) => (e.msg as NetworkMessage).type !== 'network')
     respond(res, serialize(entries.slice(-limit), text), text)
     return
   }
@@ -752,7 +789,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   if (url.pathname === '/slow') {
     const threshold = parseInt(url.searchParams.get('ms') ?? '500', 10)
     const source    = url.searchParams.get('source')
-    const limit     = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 500)
+    const limit     = parseLimit(url.searchParams.get('limit'), 50, 500)
     let entries = buf.filter((e) => {
       const n = e.msg as NetworkMessage
       return n.type === 'network' && n.duration >= threshold
@@ -767,7 +804,8 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   if (url.pathname === '/repeat') {
     const since  = parseSince(url.searchParams.get('since') ?? '5m')
     const source = url.searchParams.get('source')
-    const min    = parseInt(url.searchParams.get('min') ?? '2', 10)
+    const minRaw = parseInt(url.searchParams.get('min') ?? '2', 10)
+    const min    = Number.isFinite(minRaw) ? Math.max(1, minRaw) : 2
     let entries  = buf.filter((e) => e.time >= since)
     if (source) entries = entries.filter((e) => e.msg.source === source)
     const counts = new Map<string, { count: number; source: string; lastSeen: number; rendered: string }>()
@@ -786,12 +824,11 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
 
   // ── GET /context ─────────────────────────────────────────────────────────
   if (url.pathname === '/context') {
-    const at     = parseInt(url.searchParams.get('at') ?? '0', 10)
-    const window = parseInt(url.searchParams.get('window') ? parseSince(url.searchParams.get('window')) === 0 ? '10000' : String(Date.now() - parseSince(url.searchParams.get('window')!)) : '10000', 10)
-    const source = url.searchParams.get('source')
+    const at       = parseInt(url.searchParams.get('at') ?? '0', 10)
+    const halfMs   = parseDuration(url.searchParams.get('window'), 10000)
+    const source   = url.searchParams.get('source')
     if (!at) { res.writeHead(400); res.end(JSON.stringify({ error: 'at= (unix ms timestamp) required' })); return }
-    const halfWindow = window / 2
-    let entries = buf.filter((e) => e.time >= at - halfWindow && e.time <= at + halfWindow)
+    let entries = buf.filter((e) => e.time >= at - halfMs && e.time <= at + halfMs)
     if (source) entries = entries.filter((e) => e.msg.source === source)
     respond(res, serialize(entries, text), text)
     return
@@ -801,7 +838,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   if (url.pathname === '/trace') {
     const targetPath = url.searchParams.get('url')
     const method     = (url.searchParams.get('method') ?? '').toUpperCase()
-    const limit      = Math.min(parseInt(url.searchParams.get('limit') ?? '10', 10), 50)
+    const limit      = parseLimit(url.searchParams.get('limit'), 10, 50)
     if (!targetPath) { res.writeHead(400); res.end(JSON.stringify({ error: 'url= param required' })); return }
 
     const netEntries = buf.filter((e) => {
@@ -812,36 +849,45 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
       return true
     })
 
-    // Pair outgoing (frontend) with incoming (backend) by time proximity
+    // Pair outgoing (frontend) with incoming (backend) by time proximity.
+    // If no outgoing entries exist (only backend connected), fall back to incoming-only chains.
     const outgoing = netEntries.filter((e) => (e.msg as NetworkMessage).direction === 'outgoing')
     const incoming = netEntries.filter((e) => (e.msg as NetworkMessage).direction === 'incoming')
 
-    const chains = outgoing.slice(-limit).map((out) => {
-      const outMsg = out.msg as NetworkMessage
-      // Find the closest incoming within 3s
-      const match = incoming.find((inc) => Math.abs(inc.time - out.time) < 3000)
-      const incMsg = match ? (match.msg as NetworkMessage) : null
-      const start = out.time
-      const end   = match ? match.time + (incMsg?.duration ?? 0) : out.time + (outMsg.duration ?? 0)
+    const anchors = outgoing.length > 0 ? outgoing.slice(-limit) : incoming.slice(-limit)
+
+    const chains = anchors.map((anchor) => {
+      const anchorMsg = anchor.msg as NetworkMessage
+      const isOutgoing = anchorMsg.direction === 'outgoing'
+      // Find the closest counterpart within 3s
+      const counterparts = isOutgoing ? incoming : outgoing
+      const match = counterparts.find((e) => Math.abs(e.time - anchor.time) < 3000)
+      const matchMsg = match ? (match.msg as NetworkMessage) : null
+      const start = anchor.time
+      const end   = match ? match.time + (matchMsg?.duration ?? 0) : anchor.time + (anchorMsg.duration ?? 0)
       // Logs that fired between request start and end+200ms
       const logs = buf.filter((e) => {
         const n = e.msg as NetworkMessage
         if (n.type === 'network') return false
         return e.time >= start && e.time <= end + 200
       })
+      const outMsg = isOutgoing ? anchorMsg : matchMsg
+      const incMsg = isOutgoing ? matchMsg : anchorMsg
+      const outEntry = isOutgoing ? anchor : match
+      const incEntry = isOutgoing ? match : anchor
       return {
-        method: outMsg.method.toUpperCase(),
+        method: anchorMsg.method.toUpperCase(),
         url: targetPath,
-        frontend: {
+        frontend: outMsg && outEntry ? {
           source: outMsg.source,
-          time: out.time,
+          time: outEntry.time,
           status: outMsg.status,
           duration: outMsg.duration,
           responseSize: outMsg.responseSize,
-        },
-        backend: incMsg ? {
+        } : null,
+        backend: incMsg && incEntry ? {
           source: incMsg.source,
-          time: match!.time,
+          time: incEntry.time,
           status: incMsg.status,
           duration: incMsg.duration,
         } : null,
@@ -865,7 +911,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
       const source = url.searchParams.get('source')
       const event  = url.searchParams.get('event')
       const since  = parseSince(url.searchParams.get('since') ?? '1h')
-      const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 1000)
+      const limit  = parseLimit(url.searchParams.get('limit'), 100, 1000)
       let entries  = ragBuf.filter((e) => e.time >= since)
       if (source) entries = entries.filter((e) => e.msg.source === source)
       if (event)  entries = entries.filter((e) => (e.msg as RagMessage).event === event)
@@ -876,7 +922,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     if (url.pathname === '/rag/trace') {
       const query  = url.searchParams.get('query') ?? ''
       const source = url.searchParams.get('source')
-      const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '5', 10), 20)
+      const limit  = parseLimit(url.searchParams.get('limit'), 5, 20)
 
       // Group RAG events into chains by proximity (events within 30s of each other)
       const events = ragBuf.filter((e) => {
@@ -922,8 +968,10 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
         }
         if (r.event === 'prompt' && r.truncated)
           issues.push({ type: 'context_truncated', source: r.source, detail: `${r.tokens_total} tokens, context was cut`, time: e.time })
-        if (r.event === 'generate' && (r.duration_ms ?? 0) > 5000)
+        if (r.event === 'generate' && (r.duration_ms ?? 0) > 3000)
           issues.push({ type: 'slow_generation', source: r.source, detail: `${r.duration_ms}ms`, time: e.time })
+        if (r.event === 'generate' && r.finish_reason === 'length')
+          issues.push({ type: 'generation_cut_off', source: r.source, detail: 'finish_reason: length — response was truncated by token limit', time: e.time })
         if (r.event === 'retrieve' && (r.duration_ms ?? 0) > 2000)
           issues.push({ type: 'slow_retrieval', source: r.source, query: r.query, detail: `${r.duration_ms}ms`, time: e.time })
       }
@@ -947,11 +995,11 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     endpoints: {
       '/logs':        'GET  ?source= &level= &type=log|network &since=30s &limit=200',
       '/errors':      'GET  ?since= &limit=50',
-      '/network':     'GET  ?source= &status= &since= &limit=100',
+      '/network':     'GET  ?source= &status=<exact> &since= &limit=100',
       '/summary':     'GET  — sources + counts',
       '/sources':     'GET  — per-source health: errors, rate, lastSeen',
       '/timeline':    'GET  ?since=5m &source= &limit=500',
-      '/search':      'GET  ?q=text &source= &limit=100',
+      '/search':      'GET  ?q=text &source= &type=log|network &limit=100',
       '/slow':        'GET  ?ms=500 &source= &limit=50',
       '/repeat':      'GET  ?since=5m &source= &min=2',
       '/context':     'GET  ?at=<unix_ms> &window=10s',
@@ -979,8 +1027,8 @@ async function main(): Promise<void> {
   const server = createServer({
     port: PORT,
     onMessage,
-    onConnect: (source) => writeLine(formatSeparator(source, 'connected')),
-    onDisconnect: (source) => writeLine(formatSeparator(source, 'disconnected')),
+    onConnect: (source) => { connectedSources.add(source); writeLine(formatSeparator(source, 'connected')) },
+    onDisconnect: (source) => { connectedSources.delete(source); writeLine(formatSeparator(source, 'disconnected')) },
     onHttpRequest: handleHttpRequest,
   })
 
