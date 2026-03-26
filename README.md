@@ -17,7 +17,7 @@ npx tablogger
 ```
 
 [![npm](https://img.shields.io/npm/v/tablogger)](https://www.npmjs.com/package/tablogger)
-[![PyPI](https://img.shields.io/pypi/v/tablog)](https://pypi.org/project/tablog/)
+[![PyPI](https://img.shields.io/pypi/v/tablogger)](https://pypi.org/project/tablogger/)
 [![Crates.io](https://img.shields.io/crates/v/tablogger)](https://crates.io/crates/tablogger)
 [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
 
@@ -46,17 +46,23 @@ When you Ctrl+C tablogger, the section is removed and `CLAUDE.md` is restored.
 npm install tablogger
 ```
 
+[npmjs.com/package/tablogger](https://www.npmjs.com/package/tablogger)
+
 ### Python
 
 ```bash
-pip install tablog
+pip install tablogger
 ```
+
+[pypi.org/project/tablogger](https://pypi.org/project/tablogger/)
 
 ### Rust
 
 ```bash
 cargo add tablogger
 ```
+
+[crates.io/crates/tablogger](https://crates.io/crates/tablogger)
 
 ---
 
