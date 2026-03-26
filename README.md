@@ -1,20 +1,23 @@
-# TabLog
+# tablogger
 
 One function. Every language. One terminal.
 
-`tablog()` is a drop-in replacement for `console.log` / `print()` that routes all logs — frontend, backend, any framework — to a single unified terminal. Run `npx tablog` once and see everything in one place with colored source labels, network request tracking, and live filtering.
+`tablog()` is a drop-in replacement for `console.log` / `print()` that routes all logs — frontend, backend, any framework — to a single unified terminal. Run `npx tablogger` once and see everything in one place: colored source labels, network request tracking, log levels, split view, and a full HTTP API for querying your logs programmatically.
 
-```
-npx tablog
+```bash
+npx tablogger
 ```
 
 ```
 [React]    button clicked (×3)
-[React]    ↗  GET  /api/users              200    22ms   1.2kB
-[FastAPI]  ↙  GET  /api/users              200    18ms   1.2kB   ↔ React
-[FastAPI]  fetching users from db
-[FastAPI]  returning 3 users
+[React]    out  GET  /api/users              200     22ms   1.2kB
+[FastAPI]  in   GET  /api/users              200     18ms   1.2kB  <> React
+[FastAPI]  fetching users from db                                   main.py:42
+[FastAPI]  returning 3 users                                        main.py:45
 ```
+
+[![npm](https://img.shields.io/npm/v/tablogger)](https://www.npmjs.com/package/tablogger)
+[![license](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 ---
 
@@ -23,9 +26,7 @@ npx tablog
 ### JavaScript / TypeScript
 
 ```bash
-npm install tablog
-# or
-bun add tablog
+npm install tablogger
 ```
 
 ### Python
@@ -36,12 +37,145 @@ pip install tablog
 
 ---
 
+## Quick start
+
+**1. Start the terminal**
+
+```bash
+npx tablogger
+```
+
+**2. Add to your JS app**
+
+```js
+import { tablog } from 'tablogger'
+
+tablog('user logged in')
+tablog('query result:', { rows: 42 })
+```
+
+**3. Add to your Python app**
+
+```python
+from tablog import tablog
+
+tablog('server started')
+tablog('query result:', {'rows': 42})
+```
+
+Everything streams to the same terminal, labeled by source.
+
+---
+
+## Features
+
+### Unified terminal for every service
+
+All logs from React, Express, FastAPI, Flask, or any Node/Python service appear in one place with colored `[Source]` labels — no tab-switching.
+
+### Network request tracking
+
+Frontend outgoing requests and backend incoming requests are captured automatically and shown in a compact line:
+
+```
+[React]    out  GET  /api/users   200   22ms   1.2kB
+[FastAPI]  in   GET  /api/users   200   18ms         <> React
+```
+
+Status codes are color-coded (green/cyan/yellow/red) and slow requests (>500ms) are highlighted in red.
+
+### Request correlation
+
+When a React `fetch()` and a FastAPI handler serve the same request, tablogger links them with `<> React` — no headers injected, no CORS issues. Matched by `METHOD + path` within a 3-second window.
+
+### Caller file + line (Python)
+
+Every Python `tablog()` call shows the file and line number it was called from:
+
+```
+[FastAPI]  fetching users from db    main.py:38
+[FastAPI]  returning 3 users         main.py:41
+```
+
+### Log levels
+
+```python
+tablog('all good')                        # default
+tablog('cache miss rate high', level='warn')   # yellow
+tablog('payment failed', level='error')        # red ●
+```
+
+### Split view
+
+```
+/split 2
+```
+
+Shows two services side-by-side in the terminal. Use Tab to switch focus, arrow keys to scroll each column independently.
+
+```
+┌── React ─────────────────┬── FastAPI ────────────────┐
+│ button clicked (×1)      │ fetching users from db    │
+│ out GET /api/users  200  │ in  GET /api/users  200   │
+│ button clicked (×2)      │ returning 3 users         │
+└──────────────────────────┴───────────────────────────┘
+```
+
+### HTTP log API
+
+Query your live log stream from any tool — curl, LLM, CI script:
+
+```bash
+curl localhost:4242/logs             # all recent logs
+curl localhost:4242/errors           # errors + 5xx only
+curl localhost:4242/slow?ms=200      # requests over 200ms
+curl localhost:4242/search?q=userId  # full-text search
+curl localhost:4242/trace?url=/api/users   # full request trace
+curl localhost:4242/sources          # per-source health
+curl localhost:4242/timeline?since=5m
+curl localhost:4242/repeat?min=3     # repeated messages
+```
+
+Add `?format=text` to any endpoint for plain-text output (no ANSI codes).
+
+### RAG / LLM pipeline visibility
+
+```python
+from tablog.langchain import TablogCallbackHandler
+
+handler = TablogCallbackHandler()
+```
+
+```
+[RAGApp]  retrieve  "what is the refund policy?"  5 results  top=0.91  38ms
+[RAGApp]  rerank    10→3 results  12ms
+[RAGApp]  prompt    2100 tokens  3 chunks
+[RAGApp]  generate  gpt-4o  1240ms  2100→187 tokens
+```
+
+Query quality issues via the API:
+
+```bash
+curl localhost:4242/rag/quality   # low scores, truncated context, slow generation
+curl localhost:4242/rag/slow      # slowest pipeline steps
+```
+
+### Session export
+
+```
+/export
+```
+
+Saves the full session to `tablog-YYYYMMDD-HHMMSS.json` (structured) and `.log` (human-readable, ANSI stripped).
+
+---
+
 ## Usage
 
 ### JavaScript / TypeScript
 
 ```js
-import { tablog } from 'tablog'
+import { tablog } from 'tablogger'
 
 tablog('user logged in')
 tablog('query result:', { rows: 42 })
@@ -50,7 +184,7 @@ tablog('query result:', { rows: 42 })
 #### React / browser
 
 ```js
-import { tablog, init } from 'tablog'
+import { tablog, init } from 'tablogger'
 
 // Call once at app entry point
 init({ source: 'React', network: true })
@@ -58,14 +192,14 @@ init({ source: 'React', network: true })
 tablog('component mounted')
 ```
 
-`network: true` intercepts all `fetch` and `XHR` calls and streams them to the terminal — no browser DevTools needed.
+`network: true` intercepts all `fetch` and `XHR` calls automatically.
 
-#### Express / Node.js backend
+#### Express / Node.js
 
 ```js
-import { tablog, expressMiddleware } from 'tablog'
+import { tablog, expressMiddleware } from 'tablogger'
 
-app.use(expressMiddleware())  // captures all incoming requests
+app.use(expressMiddleware())   // captures all incoming requests
 
 app.get('/api/users', (req, res) => {
   tablog('fetching users')
@@ -82,7 +216,7 @@ tablog('server started')
 tablog('query result:', {'rows': 42})
 ```
 
-#### FastAPI / Starlette
+#### FastAPI
 
 ```python
 from tablog import tablog
@@ -104,115 +238,81 @@ from tablog.middleware import TablogFlaskMiddleware
 TablogFlaskMiddleware(app)
 ```
 
+#### LangChain
+
+```python
+from tablog.langchain import TablogCallbackHandler
+
+handler = TablogCallbackHandler(source='MyRAGApp')
+chain = RetrievalQA.from_chain_type(llm=llm, callbacks=[handler])
+```
+
 ---
 
-## CLI
+## CLI commands
 
-Start the log server:
+Start the server:
 
 ```bash
-npx tablog
+npx tablogger
 ```
-
-On first run, tablog scans your local ports, identifies running services (Vite, FastAPI, Express, etc.), shows their PIDs, and asks you to confirm which is your frontend and backend. The config is saved to `tablog.config.json`.
-
-```
-  tablog  detecting running services...
-
-  scanning ...............
-  [1]  :5173   Vite      frontend   pid 12345
-  [2]  :8000   FastAPI   backend    pid 67890
-
-  Frontend [1]: 1
-  Backend  [2]: 2
-
-  Saved to tablog.config.json
-```
-
-### Commands (while tablog is running)
 
 | Command | Description |
 |---------|-------------|
 | `/tab 1` | Focus on service 1 only |
 | `/tab 2` | Focus on service 2 only |
 | `/tab all` | Show all sources |
-| `/change` | Open interactive filter menu |
-| `/export` | Save session to `.json` + `.log` files |
+| `/split 2` | Side-by-side split view |
+| `/split off` | Exit split view |
+| `/change` | Interactive filter menu (toggle sources, log/network) |
+| `/copy` | Copy recent logs to clipboard |
+| `/export` | Save session to `.json` + `.log` |
 
 ---
 
 ## How it works
 
 ```
-┌─────────────┐     tablog()      ┌──────────────────┐
-│  React app  │ ────────────────► │                  │
-│  (browser)  │   WebSocket       │  tablog terminal │
-└─────────────┘                   │  ws://localhost  │
-                                  │  :4242           │
-┌─────────────┐     tablog()      │                  │
-│  FastAPI    │ ────────────────► │  [React]  click  │
-│  (Python)   │   WebSocket       │  [FastAPI] query │
-└─────────────┘                   └──────────────────┘
+┌─────────────┐    tablog()     ┌──────────────────────┐
+│  React app  │ ──────────────► │                      │
+│  (browser)  │   WebSocket     │  tablogger terminal  │
+└─────────────┘                 │  ws://localhost:4242 │
+                                │  http://localhost:4242│
+┌─────────────┐    tablog()     │                      │
+│  FastAPI    │ ──────────────► │  [React]   click     │
+│  (Python)   │   WebSocket     │  [FastAPI] query     │
+└─────────────┘                 └──────────────────────┘
 ```
 
-- `npx tablog` starts a WebSocket server on port 4242 (configurable via `TABLOG_PORT`)
-- Every `tablog()` call sends a JSON message to that server
-- The CLI renders all messages with colored `[Source]` labels
-- Network middleware (JS and Python) captures HTTP request/response metadata
-- Frontend `↗` requests are automatically correlated with backend `↙` responses
+- `npx tablogger` starts a WebSocket + HTTP server on port 4242
+- Every `tablog()` call sends a JSON message over WebSocket
+- The CLI renders messages with colored `[Source]` labels
+- Network middleware captures HTTP request/response metadata on both sides
+- Frontend `out` requests are correlated with backend `in` responses
 
 ---
 
 ## Configuration
 
-`tablog.config.json` (auto-generated, gitignored):
+`tablog.config.json` is auto-generated on first run (gitignored):
 
 ```json
 {
   "services": [
-    { "name": "Vite",    "port": 5173, "role": "frontend", "pid": 12345 },
-    { "name": "FastAPI", "port": 8000, "role": "backend",  "pid": 67890 }
+    { "name": "Vite",    "port": 5173, "role": "frontend" },
+    { "name": "FastAPI", "port": 8000, "role": "backend"  }
   ]
 }
 ```
 
-Delete this file and re-run `npx tablog` to re-detect services.
+Delete it and re-run `npx tablogger` to re-detect services.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TABLOG_PORT` | `4242` | WebSocket server port |
+| `TABLOG_PORT` | `4242` | WebSocket + HTTP server port |
 | `TABLOG_SOURCE` | auto-detected | Override source label |
-| `TABLOG_TIMESTAMPS` | off | Set to `1` to show timestamps |
-
----
-
-## Request correlation
-
-When a React app calls `fetch('/api/users')` and FastAPI handles it, tablog links the two log lines automatically:
-
-```
-[React]    ↗  GET  /api/users   200   22ms   1.2kB
-[FastAPI]  ↙  GET  /api/users   200   18ms   1.2kB   ↔ React
-```
-
-Correlation works by matching `METHOD + path` within a 3-second window — no headers injected, no CORS issues.
-
----
-
-## Python package
-
-The Python client connects to the tablog server in a background daemon thread. If the server isn't running yet, messages queue up and flush automatically once it starts.
-
-```
-python/
-├── tablog/
-│   ├── __init__.py      # tablog() function + WebSocket client
-│   ├── detector.py      # auto-detects FastAPI / Flask / Django
-│   └── middleware.py    # ASGI (FastAPI) + WSGI (Flask) middleware
-└── pyproject.toml
-```
 
 ---
 
