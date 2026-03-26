@@ -1062,9 +1062,56 @@ async function main(): Promise<void> {
     throw err
   })
 
-  // Clean up port on exit (Ctrl+C, SIGTERM, etc.)
+  // Inject tablogger section into CLAUDE.md so Claude Code knows the API is live
+  const claudeMdPath = require('node:path').join(process.cwd(), 'CLAUDE.md')
+  const { readFileSync, writeFileSync, existsSync } = require('node:fs') as typeof import('node:fs')
+  const CLAUDE_MARKER_START = '\n<!-- tablogger:start -->'
+  const CLAUDE_MARKER_END   = '<!-- tablogger:end -->'
+  const claudeSection = `${CLAUDE_MARKER_START}
+## tablogger (live — remove this section if tablogger is not running)
+
+Query live logs via the HTTP API at http://localhost:${PORT}:
+
+\`\`\`bash
+curl http://localhost:${PORT}/summary                    # overview: sources, total, errors
+curl http://localhost:${PORT}/logs?n=50                  # recent logs
+curl "http://localhost:${PORT}/logs?source=React&n=20"   # filter by source
+curl http://localhost:${PORT}/errors                     # errors + 5xx only
+curl "http://localhost:${PORT}/search?q=userId"          # full-text search
+curl http://localhost:${PORT}/slow?ms=500                # requests over 500ms
+curl "http://localhost:${PORT}/trace?url=/api/users"     # full request trace
+curl http://localhost:${PORT}/sources                    # connected sources + health
+curl http://localhost:${PORT}/network                    # all network entries
+\`\`\`
+
+Add \`?format=text\` to any endpoint for plain output (no JSON).
+${CLAUDE_MARKER_END}`
+
+  const originalClaudeMd = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, 'utf-8') : null
+  try {
+    // Strip any previous tablogger section then append fresh one
+    const base = (originalClaudeMd ?? '').replace(
+      /\n<!-- tablogger:start -->[\s\S]*?<!-- tablogger:end -->/g, ''
+    )
+    writeFileSync(claudeMdPath, base + claudeSection, 'utf-8')
+  } catch { /* non-fatal if cwd is read-only */ }
+
+  // Clean up port + CLAUDE.md on exit (Ctrl+C, SIGTERM, etc.)
   const shutdown = () => {
     server.close()
+    // Remove the tablogger section from CLAUDE.md
+    try {
+      if (existsSync(claudeMdPath)) {
+        const current = readFileSync(claudeMdPath, 'utf-8')
+        const cleaned = current.replace(/\n<!-- tablogger:start -->[\s\S]*?<!-- tablogger:end -->/g, '')
+        if (cleaned.trim()) {
+          writeFileSync(claudeMdPath, cleaned, 'utf-8')
+        } else {
+          // Was empty before we added our section — remove the file
+          require('node:fs').unlinkSync(claudeMdPath)
+        }
+      }
+    } catch { /* ignore */ }
     process.exit(0)
   }
   process.on('SIGINT',  shutdown)
