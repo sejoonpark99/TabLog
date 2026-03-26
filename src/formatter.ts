@@ -196,7 +196,7 @@ export function formatFocusChange(source: string | null): string {
 
 export function formatBanner(port: number, config: TablogConfig | null): string {
   const W = 56
-  const top    = `╭─ tablog ${'─'.repeat(W - 9)}╮`
+  const top    = `╭─ tablogger ${'─'.repeat(W - 12)}╮`
   const bottom = `╰${'─'.repeat(W + 1)}╯`
 
   function row(content: string): string {
@@ -220,7 +220,7 @@ export function formatBanner(port: number, config: TablogConfig | null): string 
 
   return [
     pc.dim(top),
-    pc.dim('│') + '  ' + pc.bold(pc.cyan('tablog')) + ' ' + pc.dim(`listening`) + serviceRow.replace(/^\n/, ''),
+    pc.dim('│') + '  ' + pc.bold(pc.cyan('tablogger')) + ' ' + pc.dim(`listening`) + serviceRow.replace(/^\n/, ''),
     serviceRow ? '' : null,
     pc.dim(row('')),
     wsLine,

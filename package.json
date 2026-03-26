@@ -1,12 +1,12 @@
 {
-  "name": "tablog",
+  "name": "tablogger",
   "version": "0.1.0",
   "description": "Universal logging function — tablog() works on frontend, backend, any language",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "bin": {
-    "tablog": "./dist/cli.js"
+    "tablogger": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -15,16 +15,26 @@
       "require": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "start": "node dist/cli.js"
   },
-  "keywords": ["logging", "debug", "unified", "fullstack", "devtools", "tablog"],
+  "keywords": [
+    "logging",
+    "debug",
+    "unified",
+    "fullstack",
+    "devtools",
+    "tablog"
+  ],
   "license": "MIT",
   "dependencies": {
     "picocolors": "^1.1.1",
+    "tablogger": "^0.1.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
