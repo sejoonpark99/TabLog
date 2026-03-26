@@ -4,7 +4,8 @@ import pc from 'picocolors'
 import { createServer } from './server'
 import { formatLog, formatNetwork, formatNetworkCompact, formatSeparator, formatBanner, formatFocusChange } from './formatter'
 import { filterState, registerMessage, shouldShow, openFilterMenu } from './filter'
-import { appendToBuffer, exportSession, bufferSize, getRecentBuffer } from './export'
+import { appendToBuffer, exportSession, bufferSize, getRecentBuffer, getAllBuffer } from './export'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig, runSetupWizard } from './setup'
 import type { AltTabMessage } from './server'
 import type { NetworkMessage } from './network'
@@ -565,6 +566,88 @@ function doCopy(rl: readline.Interface): void {
   process.stdin.on('data', onKey)
 }
 
+// ── HTTP log API ──────────────────────────────────────────────────────────
+
+function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
+  const { URL } = require('node:url') as typeof import('node:url')
+  const url = new URL(req.url ?? '/', `http://localhost`)
+
+  res.setHeader('Content-Type', 'application/json')
+  res.setHeader('Access-Control-Allow-Origin', '*')
+
+  if (req.method !== 'GET') {
+    res.writeHead(405)
+    res.end(JSON.stringify({ error: 'Method not allowed' }))
+    return
+  }
+
+  const strip = (s: string) => s.replace(/\x1B\[[0-9;]*m/g, '') // eslint-disable-line no-control-regex
+  const buf = getAllBuffer()
+
+  function serialize(entries: ReturnType<typeof getAllBuffer>) {
+    return entries.map((e) => ({ time: e.time, rendered: strip(e.rendered), ...e.msg }))
+  }
+
+  if (url.pathname === '/logs') {
+    const source  = url.searchParams.get('source')
+    const level   = url.searchParams.get('level')
+    const type    = url.searchParams.get('type')
+    const limit   = Math.min(parseInt(url.searchParams.get('limit') ?? '200', 10), 2000)
+    let entries   = buf
+    if (source) entries = entries.filter((e) => e.msg.source === source)
+    if (type === 'network') entries = entries.filter((e) => (e.msg as NetworkMessage).type === 'network')
+    if (type === 'log')     entries = entries.filter((e) => (e.msg as NetworkMessage).type !== 'network')
+    if (level)  entries = entries.filter((e) => (e.msg as { level?: string }).level === level)
+    res.writeHead(200)
+    res.end(JSON.stringify(serialize(entries.slice(-limit))))
+    return
+  }
+
+  if (url.pathname === '/errors') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 500)
+    const errors = buf.filter((e) => {
+      const m = e.msg as { level?: string; type?: string; status?: number }
+      return m.level === 'error' || (m.type === 'network' && (m.status ?? 0) >= 500)
+    })
+    res.writeHead(200)
+    res.end(JSON.stringify(serialize(errors.slice(-limit))))
+    return
+  }
+
+  if (url.pathname === '/network') {
+    const source    = url.searchParams.get('source')
+    const minStatus = parseInt(url.searchParams.get('status') ?? '0', 10)
+    const limit     = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 1000)
+    let entries = buf.filter((e) => (e.msg as NetworkMessage).type === 'network')
+    if (source) entries = entries.filter((e) => e.msg.source === source)
+    if (minStatus) entries = entries.filter((e) => ((e.msg as NetworkMessage).status ?? 0) >= minStatus)
+    res.writeHead(200)
+    res.end(JSON.stringify(serialize(entries.slice(-limit))))
+    return
+  }
+
+  if (url.pathname === '/summary') {
+    const sources = Array.from(filterState.knownSources.entries()).map(([name, counts]) => ({ name, ...counts }))
+    const errorCount = buf.filter((e) => {
+      const m = e.msg as { level?: string; type?: string; status?: number }
+      return m.level === 'error' || (m.type === 'network' && (m.status ?? 0) >= 500)
+    }).length
+    res.writeHead(200)
+    res.end(JSON.stringify({ sources, total: buf.length, errors: errorCount, port: PORT }))
+    return
+  }
+
+  res.writeHead(200)
+  res.end(JSON.stringify({
+    endpoints: {
+      '/logs':    'GET  ?source= &level= &type=log|network &limit=200',
+      '/errors':  'GET  ?limit=50   — error logs + 5xx responses',
+      '/network': 'GET  ?source= &status= &limit=100',
+      '/summary': 'GET  — connected sources + counts',
+    },
+  }))
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -574,19 +657,20 @@ async function main(): Promise<void> {
     config = await runSetupWizard().catch(() => null)
   }
 
-  // Start WebSocket server
-  const wss = createServer({
+  // Start WebSocket + HTTP server
+  const server = createServer({
     port: PORT,
     onMessage,
     onConnect: (source) => writeLine(formatSeparator(source, 'connected')),
     onDisconnect: (source) => writeLine(formatSeparator(source, 'disconnected')),
+    onHttpRequest: handleHttpRequest,
   })
 
-  wss.on('listening', () => {
+  server.on('listening', () => {
     console.log(formatBanner(PORT, config))
   })
 
-  wss.on('error', (err: NodeJS.ErrnoException) => {
+  server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
       console.error(pc.red(`\nPort ${PORT} is already in use.`))
       console.error(pc.dim('Set TABLOG_PORT to use a different port and retry.'))
@@ -692,7 +776,7 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', () => {
     process.stdout.write('\n' + pc.dim('tablog shutting down…') + '\n')
-    wss.close()
+    server.close()
     process.exit(0)
   })
 }

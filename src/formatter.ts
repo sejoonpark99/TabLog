@@ -174,7 +174,7 @@ export function formatBanner(port: number, config: TablogConfig | null): string 
     return `│  ${content}${' '.repeat(Math.max(0, pad - 1))}│`
   }
 
-  const wsLine  = row(`ws://localhost:${port}`)
+  const wsLine  = row(`ws://localhost:${port}   http://localhost:${port}/logs`)
   const blank   = row('')
   const cmd1    = row(`${pc.dim('/tab')} [1|2|all]  switch  ${pc.dim('/split')} [1|2|off]  columns`)
   const cmd2    = row(`${pc.dim('/change')}  filter  ${pc.dim('/copy')}  copy  ${pc.dim('/export')}  save`)

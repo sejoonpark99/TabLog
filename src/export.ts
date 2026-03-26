@@ -55,3 +55,7 @@ export function bufferSize(): number {
 export function getRecentBuffer(n = 50): BufferedEntry[] {
   return sessionBuffer.slice(-n)
 }
+
+export function getAllBuffer(): BufferedEntry[] {
+  return sessionBuffer
+}
