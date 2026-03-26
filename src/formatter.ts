@@ -196,7 +196,7 @@ export function formatFocusChange(source: string | null): string {
 
 export function formatBanner(port: number, config: TablogConfig | null): string {
   const W = 56
-  const top    = `╭─ tablogger ${'─'.repeat(W - 12)}╮`
+  const top    = `╭${'─'.repeat(W + 1)}╮`
   const bottom = `╰${'─'.repeat(W + 1)}╯`
 
   function row(content: string): string {
@@ -205,30 +205,40 @@ export function formatBanner(port: number, config: TablogConfig | null): string 
     return `│  ${content}${' '.repeat(Math.max(0, pad - 1))}│`
   }
 
-  const wsLine  = row(`ws://localhost:${port}   http://localhost:${port}/logs`)
-  const blank   = row('')
-  const cmd1    = row(`${pc.dim('/tab')} [1|2|all]  switch  ${pc.dim('/split')} [1|2|off]  columns`)
-  const cmd2    = row(`${pc.dim('/change')}  filter  ${pc.dim('/copy')}  copy  ${pc.dim('/export')}  save`)
+  // ASCII art "tablog"
+  const ascii = [
+    ' _        _     _             ',
+    '| |_ __ _| |__ | | ___   __ _',
+    '| __/ _` | \'_ \\| |/ _ \\ / _` |',
+    '| || (_| | |_) | | (_) | (_| |',
+    ' \\__\\__,_|_.__/|_|\\___/ \\__, |',
+    '                         |___/ ',
+  ]
+
+  const wsLine = row(`ws://localhost:${port}   http://localhost:${port}/logs`)
 
   let serviceRow = ''
   if (config?.services?.length) {
     const parts = config.services.map(
       (s) => `${getColor(s.name)(s.name)} ${pc.dim(`:${s.port}`)}`,
     )
-    serviceRow = '\n' + row(parts.join(pc.dim('  ·  ')))
+    serviceRow = row(parts.join(pc.dim('  ·  ')))
   }
 
   return [
+    '',
+    ...ascii.map((l) => pc.bold(pc.cyan(l))),
+    '',
     pc.dim(top),
-    pc.dim('│') + '  ' + pc.bold(pc.cyan('tablogger')) + ' ' + pc.dim(`listening`) + serviceRow.replace(/^\n/, ''),
-    serviceRow ? '' : null,
+    serviceRow || row(pc.dim('listening on')),
+    row(pc.dim(`ws://localhost:${port}   http://localhost:${port}/logs`)),
     pc.dim(row('')),
-    wsLine,
-    pc.dim(blank),
-    cmd1,
-    cmd2,
+    row(`${pc.dim('/tab')}     [1|2|all]   switch source focus`),
+    row(`${pc.dim('/split')}   [1|2|off]   side-by-side columns`),
+    row(`${pc.dim('/change')}              filter sources & types`),
+    row(`${pc.dim('/copy')}                copy recent logs`),
+    row(`${pc.dim('/export')}              save session to file`),
     pc.dim(bottom),
-  ]
-    .filter((l) => l !== null)
-    .join('\n')
+    '',
+  ].join('\n')
 }
