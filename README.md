@@ -13,10 +13,12 @@ npx tablogger
 [React]    out  GET  /api/users              200     22ms   1.2kB
 [FastAPI]  in   GET  /api/users              200     18ms   1.2kB  <> React
 [FastAPI]  fetching users from db                                   main.py:42
-[FastAPI]  returning 3 users                                        main.py:45
+[Rust]     processed 42 items                                       main.rs:18
 ```
 
 [![npm](https://img.shields.io/npm/v/tablogger)](https://www.npmjs.com/package/tablogger)
+[![PyPI](https://img.shields.io/pypi/v/tablog)](https://pypi.org/project/tablog/)
+[![Crates.io](https://img.shields.io/crates/v/tablogger)](https://crates.io/crates/tablogger)
 [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 ---
@@ -50,6 +52,12 @@ npm install tablogger
 pip install tablog
 ```
 
+### Rust
+
+```bash
+cargo add tablogger
+```
+
 ---
 
 ## Quick start
@@ -76,6 +84,15 @@ from tablog import tablog
 
 tablog('server started')
 tablog('query result:', {'rows': 42})
+```
+
+**4. Add to your Rust app**
+
+```rust
+use tablog::{tablog, warn, error, info};
+
+tablog!("server started on port {}", 8080);
+warn!("cache miss for key {}", "user:42");
 ```
 
 Everything streams to the same terminal, labeled by source.
@@ -253,6 +270,21 @@ from tablog.middleware import TablogFlaskMiddleware
 TablogFlaskMiddleware(app)
 ```
 
+### Rust
+
+```rust
+use tablog::{tablog, warn, error, info};
+
+fn main() {
+    tablog::init("my-api"); // optional — defaults to "Rust"
+
+    tablog!("server started on port {}", 8080);
+    info!("connected to database");
+    warn!("cache miss for key {}", "user:42");
+    error!("request failed: {}", "timeout");
+}
+```
+
 #### LangChain
 
 ```python
@@ -296,7 +328,11 @@ npx tablogger
 ┌─────────────┐    tablog()     │                      │
 │  FastAPI    │ ──────────────► │  [React]   click     │
 │  (Python)   │   WebSocket     │  [FastAPI] query     │
-└─────────────┘                 └──────────────────────┘
+└─────────────┘                 │  [Rust]    started   │
+                                │                      │
+┌─────────────┐    tablog!()    │                      │
+│  Rust app   │ ──────────────► │                      │
+└─────────────┘   WebSocket     └──────────────────────┘
 ```
 
 - `npx tablogger` starts a WebSocket + HTTP server on port 4242

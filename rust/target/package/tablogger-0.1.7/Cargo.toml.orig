@@ -1,0 +1,16 @@
+[package]
+name = "tablogger"
+version = "0.1.7"
+edition = "2021"
+description = "Rust SDK for tablogger — universal log viewer"
+license = "MIT"
+repository = "https://github.com/your-org/alt-tab"
+keywords = ["logging", "debugging", "tablogger", "devtools"]
+categories = ["development-tools::debugging"]
+
+[lib]
+name = "tablog"
+
+[dependencies]
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+serde_json = "1"
