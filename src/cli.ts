@@ -1062,6 +1062,14 @@ async function main(): Promise<void> {
     throw err
   })
 
+  // Clean up port on exit (Ctrl+C, SIGTERM, etc.)
+  const shutdown = () => {
+    server.close()
+    process.exit(0)
+  }
+  process.on('SIGINT',  shutdown)
+  process.on('SIGTERM', shutdown)
+
   // Set up stdin readline for /change and /export commands
   if (process.stdin.isTTY) {
     const rl = readline.createInterface({
