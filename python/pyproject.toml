@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tablog"
+name = "tablogger"
 version = "0.1.7"
 description = "Universal logging function for Python — tablog() works everywhere"
 readme = "README.md"
