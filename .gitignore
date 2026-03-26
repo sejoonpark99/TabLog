@@ -4,6 +4,7 @@ dist/
 tablog.config.json
 test/
 plans/
+docs/
 python/alt_tab/
 .env
 *.log
