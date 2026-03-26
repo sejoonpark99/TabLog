@@ -78,6 +78,24 @@ function _fallback(source: string, message: string): void {
   console.log(`[${source}] ${message}`)
 }
 
+function _callerLocation(): { file: string; line: number } | null {
+  try {
+    const stack = new Error().stack ?? ''
+    // Walk frames until we're outside this file
+    const frames = stack.split('\n').slice(1)
+    for (const frame of frames) {
+      if (frame.includes('/index.') || frame.includes('\\index.') ||
+          frame.includes('tablogger') || frame.includes('node_modules')) continue
+      // Parse "    at funcName (file:line:col)" or "    at file:line:col"
+      const m = frame.match(/\((.+):(\d+):\d+\)$/) ?? frame.match(/at (.+):(\d+):\d+$/)
+      if (!m) continue
+      const file = m[1].split(/[\\/]/).pop() ?? m[1]
+      return { file, line: parseInt(m[2], 10) }
+    }
+  } catch { /* ignore */ }
+  return null
+}
+
 function _serialize(args: unknown[]): string {
   return args
     .map((a) => {
@@ -125,12 +143,14 @@ export function tablog(...args: unknown[]): void {
   if (!_initialized) init()
 
   const message = _serialize(args)
+  const caller = _callerLocation()
   const payload = {
     type: 'log' as const,
     source: _source,
     message,
     level: 'log' as const,
     timestamp: Date.now(),
+    ...(caller ?? {}),
   }
 
   if (_ws && _ws.readyState === WebSocket.OPEN) {
