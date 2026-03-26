@@ -21,6 +21,21 @@ npx tablogger
 
 ---
 
+## Claude Code integration
+
+When you run `npx tablogger`, it automatically writes a live API reference into your project's `CLAUDE.md`. Claude Code reads this on every prompt — so Claude and its agents can query your logs, errors, traces, and slow requests directly as part of debugging, without any extra setup.
+
+```
+You:     "why is /api/users slow?"
+Claude:  [curls localhost:4242/slow]
+         [curls localhost:4242/trace?url=/api/users]
+         "The FastAPI handler is taking 1.2s — tablog shows it's the db query on main.py:38"
+```
+
+When you Ctrl+C tablogger, the section is removed and `CLAUDE.md` is restored.
+
+---
+
 ## Installation
 
 ### JavaScript / TypeScript
