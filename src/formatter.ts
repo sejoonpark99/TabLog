@@ -79,13 +79,14 @@ function fmtDuration(ms: number): string {
 
 // ── Log line ──────────────────────────────────────────────────────────────
 
-export function formatLog(source: string, message: string, level?: string): string {
+export function formatLog(source: string, message: string, level?: string, file?: string, line?: number): string {
   const lbl = label(source)
   const lblLen = lbl.replace(/\x1B\[[0-9;]*m/g, '').length
   // +2 for the two spaces between label and message
   const col = lblLen + 2
   const termWidth = process.stdout.columns || 120
   const msgWidth = termWidth - col
+  const caller = file ? pc.dim(` ${file}:${line}`) : ''
   let text: string
   switch (level) {
     case 'error': text = pc.red(`● ${wrapMessage(message, msgWidth - 2, col + 2)}`); break
@@ -93,7 +94,7 @@ export function formatLog(source: string, message: string, level?: string): stri
     case 'info':  text = pc.dim(wrapMessage(message, msgWidth, col)); break
     default:      text = wrapMessage(message, msgWidth, col)
   }
-  return `${lbl}  ${text}`
+  return `${lbl}  ${text}${caller}`
 }
 
 // ── Network line ──────────────────────────────────────────────────────────
@@ -149,6 +150,35 @@ export function formatNetworkCompact(
   const displayUrl = url.length > maxUrl ? `${url.slice(0, maxUrl - 1)}…` : url
   const match = matchedSource ? `  ${pc.dim('<>')} ${getColor(matchedSource)(matchedSource)}` : ''
   return `${lbl}  ${fmtStatus(status)}  ${methodStr} ${displayUrl}  ${fmtDuration(duration)}  ${pc.dim(fmtSize(size).padStart(5))}${match}`
+}
+
+// ── RAG line ──────────────────────────────────────────────────────────────
+
+export function formatRag(msg: import('./server').RagMessage): string {
+  const lbl = label(msg.source)
+  const ev = msg.event
+  const dur = fmtDuration(msg.duration_ms ?? 0)
+
+  if (ev === 'retrieve') {
+    const q = `"${(msg.query ?? '').slice(0, 40)}"`
+    const count = msg.count ?? 0
+    const low = msg.topScore != null && msg.topScore < 0.7
+    const scoreStr = msg.topScore != null ? pc.dim(`  top=${msg.topScore.toFixed(2)}`) : ''
+    const countStr = low ? pc.yellow(`${count} results`) : pc.dim(`${count} results`)
+    return `${lbl}  ${pc.cyan('retrieve')}  ${pc.dim(q)}  ${countStr}${scoreStr}  ${dur}`
+  }
+  if (ev === 'rerank') {
+    return `${lbl}  ${pc.cyan('rerank')}  ${pc.dim(`${msg.inputCount ?? '?'}→${msg.outputCount ?? '?'} results`)}  ${dur}`
+  }
+  if (ev === 'prompt') {
+    const trunc = msg.truncated ? '  ' + pc.yellow('truncated!') : ''
+    return `${lbl}  ${pc.cyan('prompt')}  ${pc.dim(`${msg.tokens_total ?? '?'} tokens  ${msg.chunks_used ?? '?'} chunks`)}${trunc}`
+  }
+  if (ev === 'generate') {
+    const tok = msg.tokens_in != null ? pc.dim(`  ${msg.tokens_in}→${msg.tokens_out} tokens`) : ''
+    return `${lbl}  ${pc.cyan('generate')}  ${pc.dim(msg.model ?? '')}  ${dur}${tok}`
+  }
+  return `${lbl}  ${pc.cyan(ev)}`
 }
 
 // ── Tab focus change ──────────────────────────────────────────────────────

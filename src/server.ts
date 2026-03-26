@@ -9,9 +9,33 @@ export interface LogMessage {
   message: string
   level?: 'log' | 'warn' | 'error' | 'info'
   timestamp: number
+  file?: string
+  line?: number
 }
 
-export type AltTabMessage = LogMessage | NetworkMessage
+export interface RagMessage {
+  type: 'rag'
+  event: 'retrieve' | 'rerank' | 'prompt' | 'generate'
+  source: string
+  timestamp: number
+  query?: string
+  duration_ms?: number
+  count?: number
+  topScore?: number | null
+  results?: Array<{ id?: string; score?: number; text: string }>
+  inputCount?: number
+  outputCount?: number
+  chunks_used?: number
+  tokens_context?: number
+  tokens_total?: number
+  truncated?: boolean
+  model?: string
+  tokens_in?: number | null
+  tokens_out?: number | null
+  finish_reason?: string
+}
+
+export type AltTabMessage = LogMessage | NetworkMessage | RagMessage
 
 export interface ServerOptions {
   port: number

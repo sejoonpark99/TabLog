@@ -13,6 +13,7 @@ Falls back to print() with a [Source] prefix if the server is unreachable.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sys
@@ -107,6 +108,13 @@ def _init() -> None:
         t.start()
 
 
+def _send_raw(event: dict) -> None:
+    """Send a pre-built event dict. Used by framework integrations."""
+    if not _initialized:
+        _init()
+    _queue.put(event)
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 def tablog(*args: Any) -> None:
@@ -121,12 +129,19 @@ def tablog(*args: Any) -> None:
 
     message = _serialize(*args)
 
+    # Capture caller location
+    frame = inspect.stack()[1]
+    caller_file = os.path.basename(frame.filename)
+    caller_line = frame.lineno
+
     msg = {
         "type": "log",
         "source": _source,
         "message": message,
         "level": "log",
         "timestamp": int(time.time() * 1000),
+        "file": caller_file,
+        "line": caller_line,
     }
     _queue.put(msg)
     print(f"[{_source}] {message}", flush=True)
@@ -155,4 +170,4 @@ def init(source: Optional[str] = None, port: Optional[int] = None) -> None:
         t.start()
 
 
-__all__ = ["tablog", "init"]
+__all__ = ["tablog", "init", "_send_raw"]

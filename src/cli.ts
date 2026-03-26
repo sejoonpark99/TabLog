@@ -2,12 +2,12 @@ import readline from 'node:readline'
 import { execSync } from 'node:child_process'
 import pc from 'picocolors'
 import { createServer } from './server'
-import { formatLog, formatNetwork, formatNetworkCompact, formatSeparator, formatBanner, formatFocusChange } from './formatter'
+import { formatLog, formatNetwork, formatNetworkCompact, formatSeparator, formatBanner, formatFocusChange, formatRag } from './formatter'
 import { filterState, registerMessage, shouldShow, openFilterMenu } from './filter'
 import { appendToBuffer, exportSession, bufferSize, getRecentBuffer, getAllBuffer } from './export'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig, runSetupWizard } from './setup'
-import type { AltTabMessage } from './server'
+import type { AltTabMessage, RagMessage } from './server'
 import type { NetworkMessage } from './network'
 
 const PORT = parseInt(process.env.TABLOG_PORT ?? process.env.ALT_TAB_PORT ?? '4242', 10)
@@ -296,8 +296,8 @@ function writeLineSplit(msg: AltTabMessage): void {
     const matchedSource = handleCorrelation(n)
     line = formatNetworkCompact(n.source, n.method, n.url, n.status, n.duration, size, matchedSource)
   } else {
-    const l = msg as { source: string; message: string; level?: string }
-    line = formatLog(l.source, l.message, l.level)
+    const l = msg as { source: string; message: string; level?: string; file?: string; line?: number }
+    line = formatLog(l.source, l.message, l.level, l.file, l.line)
   }
 
   // formatLog embeds \n for streaming wrapping — flatten to a single line
@@ -403,9 +403,11 @@ function onMessage(msg: AltTabMessage): void {
       n.duration, n.responseSize, n.requestSize,
       n.direction, matchedSource,
     )
+  } else if ((msg as RagMessage).type === 'rag') {
+    line = ts() + formatRag(msg as RagMessage)
   } else {
-    const l = msg as { source: string; message: string; level?: string }
-    line = ts() + formatLog(l.source, l.message, l.level)
+    const l = msg as { source: string; message: string; level?: string; file?: string; line?: number }
+    line = ts() + formatLog(l.source, l.message, l.level, l.file, l.line)
   }
 
   appendToBuffer(msg, line)
@@ -855,21 +857,110 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     return
   }
 
+  // ── GET /rag ─────────────────────────────────────────────────────────────
+  if (url.pathname === '/rag' || url.pathname.startsWith('/rag/')) {
+    const ragBuf = buf.filter((e) => (e.msg as RagMessage).type === 'rag')
+
+    if (url.pathname === '/rag') {
+      const source = url.searchParams.get('source')
+      const event  = url.searchParams.get('event')
+      const since  = parseSince(url.searchParams.get('since') ?? '1h')
+      const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '100', 10), 1000)
+      let entries  = ragBuf.filter((e) => e.time >= since)
+      if (source) entries = entries.filter((e) => e.msg.source === source)
+      if (event)  entries = entries.filter((e) => (e.msg as RagMessage).event === event)
+      respond(res, serialize(entries.slice(-limit), text), text)
+      return
+    }
+
+    if (url.pathname === '/rag/trace') {
+      const query  = url.searchParams.get('query') ?? ''
+      const source = url.searchParams.get('source')
+      const limit  = Math.min(parseInt(url.searchParams.get('limit') ?? '5', 10), 20)
+
+      // Group RAG events into chains by proximity (events within 30s of each other)
+      const events = ragBuf.filter((e) => {
+        if (source && e.msg.source !== source) return false
+        const r = e.msg as RagMessage
+        if (query && r.query && !r.query.toLowerCase().includes(query.toLowerCase())) return false
+        return true
+      })
+
+      // Find retrieve events as chain anchors
+      const retrieves = events.filter((e) => (e.msg as RagMessage).event === 'retrieve')
+      const chains = retrieves.slice(-limit).map((ret) => {
+        const retMsg = ret.msg as RagMessage
+        const chainEnd = ret.time + 30000
+        const chain = events.filter((e) => e.time >= ret.time && e.time <= chainEnd && e.msg.source === ret.msg.source)
+        const steps = chain.map((e) => {
+          const r = e.msg as RagMessage
+          return { event: r.event, duration_ms: r.duration_ms, ...r }
+        })
+        return {
+          query: retMsg.query,
+          source: retMsg.source,
+          time: ret.time,
+          total_ms: steps.reduce((s, e) => s + (e.duration_ms ?? 0), 0),
+          steps,
+        }
+      })
+      respond(res, chains, text)
+      return
+    }
+
+    if (url.pathname === '/rag/quality') {
+      const since = parseSince(url.searchParams.get('since') ?? '1h')
+      const issues: Array<{ type: string; source: string; query?: string; detail: string; time: number }> = []
+
+      for (const e of ragBuf.filter((e) => e.time >= since)) {
+        const r = e.msg as RagMessage
+        if (r.event === 'retrieve') {
+          if (r.topScore != null && r.topScore < 0.7)
+            issues.push({ type: 'low_retrieval_score', source: r.source, query: r.query, detail: `top score ${r.topScore.toFixed(2)} < 0.7`, time: e.time })
+          if ((r.count ?? 0) === 0)
+            issues.push({ type: 'empty_retrieval', source: r.source, query: r.query, detail: 'no results returned', time: e.time })
+        }
+        if (r.event === 'prompt' && r.truncated)
+          issues.push({ type: 'context_truncated', source: r.source, detail: `${r.tokens_total} tokens, context was cut`, time: e.time })
+        if (r.event === 'generate' && (r.duration_ms ?? 0) > 5000)
+          issues.push({ type: 'slow_generation', source: r.source, detail: `${r.duration_ms}ms`, time: e.time })
+        if (r.event === 'retrieve' && (r.duration_ms ?? 0) > 2000)
+          issues.push({ type: 'slow_retrieval', source: r.source, query: r.query, detail: `${r.duration_ms}ms`, time: e.time })
+      }
+      respond(res, issues, text)
+      return
+    }
+
+    if (url.pathname === '/rag/slow') {
+      const threshold = parseInt(url.searchParams.get('ms') ?? '1000', 10)
+      const since     = parseSince(url.searchParams.get('since') ?? '1h')
+      const slow = ragBuf
+        .filter((e) => e.time >= since && (e.msg as RagMessage).duration_ms != null && (e.msg as RagMessage).duration_ms! >= threshold)
+        .sort((a, b) => (b.msg as RagMessage).duration_ms! - (a.msg as RagMessage).duration_ms!)
+      respond(res, serialize(slow.slice(0, 50), text), text)
+      return
+    }
+  }
+
   // ── GET / ─────────────────────────────────────────────────────────────────
   respond(res, {
     endpoints: {
-      '/logs':     'GET  ?source= &level= &type=log|network &since=30s &limit=200',
-      '/errors':   'GET  ?since= &limit=50',
-      '/network':  'GET  ?source= &status= &since= &limit=100',
-      '/summary':  'GET  — sources + counts',
-      '/sources':  'GET  — per-source health: errors, rate, lastSeen',
-      '/timeline': 'GET  ?since=5m &source= &limit=500',
-      '/search':   'GET  ?q=text &source= &limit=100',
-      '/slow':     'GET  ?ms=500 &source= &limit=50',
-      '/repeat':   'GET  ?since=5m &source= &min=2',
-      '/context':  'GET  ?at=<unix_ms> &window=10s',
-      '/trace':    'GET  ?url=/api/path &method=GET &limit=10',
-      '/mark':     'POST { label } → { id, time }  — then use ?since=mark_<id>',
+      '/logs':        'GET  ?source= &level= &type=log|network &since=30s &limit=200',
+      '/errors':      'GET  ?since= &limit=50',
+      '/network':     'GET  ?source= &status= &since= &limit=100',
+      '/summary':     'GET  — sources + counts',
+      '/sources':     'GET  — per-source health: errors, rate, lastSeen',
+      '/timeline':    'GET  ?since=5m &source= &limit=500',
+      '/search':      'GET  ?q=text &source= &limit=100',
+      '/slow':        'GET  ?ms=500 &source= &limit=50',
+      '/repeat':      'GET  ?since=5m &source= &min=2',
+      '/context':     'GET  ?at=<unix_ms> &window=10s',
+      '/trace':       'GET  ?url=/api/path &method=GET &limit=10',
+      '/mark':        'POST { label } → { id, time }  — then use ?since=mark_<id>',
+      '/rag':         'GET  ?source= &event=retrieve|rerank|prompt|generate &since=1h &limit=100',
+      '/rag/trace':   'GET  ?query= &source= &limit=5  — RAG pipeline chains',
+      '/rag/quality': 'GET  ?since=1h  — retrieval quality issues',
+      '/rag/slow':    'GET  ?ms=1000 &since=1h  — slow RAG operations',
     },
     tip: 'Add ?format=text to any endpoint for plain text output',
   }, text)
