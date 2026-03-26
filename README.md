@@ -54,7 +54,7 @@ npm install tablogger
 pip install tablogger
 ```
 
-[pypi.org/project/tablogger](https://pypi.org/project/tablogger/)
+[pypi.org/project/tablogger](https://pypi.org/project/tablogger/0.1.7/)
 
 ### Rust
 
